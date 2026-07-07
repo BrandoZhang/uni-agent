@@ -141,6 +141,17 @@ class _Handler(BaseHTTPRequestHandler):
             "content": f"[director step {n_assistant}] calling {step['name']}",
             "tool_calls": [tool_call],
         }
+        # Synthesize a realistic usage breakdown so the fine-grained LLM cost
+        # metrics (input / output / cached) are visible end-to-end. Rough
+        # token estimate from the message payload; simulate prompt caching on
+        # follow-up turns (a growing cached-input subset of the prompt).
+        prompt_chars = sum(len(str(m.get("content") or "")) for m in messages)
+        for m in messages:
+            for tc in m.get("tool_calls") or []:
+                prompt_chars += len(str(tc.get("function", {}).get("arguments") or ""))
+        prompt_tokens = prompt_chars // 4
+        completion_tokens = 24
+        cached_tokens = int(prompt_tokens * 0.6) if n_assistant > 0 else 0
         self._json(
             200,
             {
@@ -149,7 +160,13 @@ class _Handler(BaseHTTPRequestHandler):
                 "created": 0,
                 "model": req.get("model", "mock-director"),
                 "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls"}],
-                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
+                    "prompt_tokens_details": {"cached_tokens": cached_tokens},
+                    "completion_tokens_details": {"reasoning_tokens": 0},
+                },
             },
         )
 

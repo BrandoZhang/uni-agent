@@ -45,6 +45,62 @@ def fast_deepcopy(obj):
     return orjson.loads(orjson.dumps(obj))
 
 
+# ---- cost accounting -------------------------------------------------------
+# All costs are accumulated (summed) into ``rollout_cache["metrics"]`` under a
+# ``cost/`` namespace, so they flow to the trajectory metrics / dashboard /
+# training logs alongside the timing metrics written by ``simple_timer``.
+
+_LLM_COST_FIELDS = ("prompt_tokens", "completion_tokens", "cached_tokens", "reasoning_tokens", "total_tokens")
+
+
+def _accumulate_metric(metrics: dict, key: str, value) -> None:
+    if not value:
+        return
+    metrics[key] = metrics.get(key, 0) + value
+
+
+def _record_llm_cost(metrics: dict, generation_info: dict) -> None:
+    """Per model call: input / output / cached / reasoning / total tokens."""
+    _accumulate_metric(metrics, "cost/llm/calls", 1)
+    for field in _LLM_COST_FIELDS:
+        _accumulate_metric(metrics, f"cost/llm/{field}", int(generation_info.get(field, 0) or 0))
+
+
+def _extract_tool_usage(observation: str) -> dict | None:
+    """Opportunistically pull a tool's ``usage`` dict from its stdout.
+
+    Convention (tool-agnostic): any tool MAY print a JSON object containing a
+    ``usage`` field; the loop meters it without knowing the tool. Returns the
+    usage dict, or ``None`` if the observation has no such payload.
+    """
+    if not observation:
+        return None
+    for line in reversed(observation.splitlines()):
+        line = line.strip()
+        if line.startswith("{") and line.endswith("}"):
+            try:
+                obj = orjson.loads(line)
+            except orjson.JSONDecodeError:
+                continue
+            usage = obj.get("usage") if isinstance(obj, dict) else None
+            return usage if isinstance(usage, dict) else None
+    return None
+
+
+def _record_tool_cost(metrics: dict, tool_name: str, observation: str) -> None:
+    """Per tool call: sum any numeric fields the tool reported under ``usage``."""
+    usage = _extract_tool_usage(observation)
+    if not usage:
+        return
+    _accumulate_metric(metrics, "cost/tool/calls", 1)
+    for key, value in usage.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        _accumulate_metric(metrics, f"cost/tool/{tool_name}/{key}", value)
+        if key == "total_tokens":
+            _accumulate_metric(metrics, "cost/tool/total_tokens", value)
+
+
 class AgentInteraction:
     def __init__(
         self,
@@ -135,9 +191,11 @@ class AgentInteraction:
                 rollout_cache=self.rollout_cache,
             )
             step_output.response = model_output
+            _record_llm_cost(rollout_cache["metrics"], generation_info)
             self.logger.info(
                 f"Prompt Tokens: {generation_info['prompt_tokens']}, "
-                f"Completion Tokens: {generation_info['completion_tokens']}"
+                f"Completion Tokens: {generation_info['completion_tokens']}, "
+                f"Cached: {generation_info.get('cached_tokens', 0)}"
             )
             self.logger.debug(f"Model Output:\n{model_output}")
         except MaxTokenExceededError as e:
@@ -261,6 +319,9 @@ class AgentInteraction:
                         "content": observation,
                     }
                 )
+
+                # Meter any usage the tool reported (generic; no-op if none).
+                _record_tool_cost(self.rollout_cache["metrics"], tool_call.function.name, observation)
 
                 # On hard failure (dead session / budget out), synthesize
                 # `skipped` results for remaining tool calls to keep the

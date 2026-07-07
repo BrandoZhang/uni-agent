@@ -202,18 +202,23 @@ if last and last.tool_results:
         + "\n".join("    " + ln for ln in (last.tool_results[-1].observation or "").splitlines()[:12])
     )
 
-# --- cost summary ----------------------------------------------------------
-try:
-    from uni_agent.tools.media_gen import mediakit
-
-    totals = mediakit.summarize_usage(usage_log)
-    print("\n[cost] usage ledger totals:")
-    print(
-        f"  calls={totals['calls']}  images={totals['images_generated']}  video_seconds={totals['video_seconds']}  total_tokens={totals['total_tokens']}"
-    )
-    print(f"  by_tool={totals['by_tool']}")
-except Exception as e:  # noqa: BLE001
-    print(f"[cost] could not summarize usage: {e}")
+# --- cost summary (fine-grained, from trajectory metrics) ------------------
+# The interaction loop accumulates cost into rollout_cache["metrics"] under a
+# `cost/` namespace: LLM tokens (input / output / cached / reasoning) and, per
+# tool, whatever `usage` each tool reported. These flow to AgentLoopOutput
+# metrics (dashboard / training) in the UniAgentLoop path.
+metrics = result.get("rollout_cache", {}).get("metrics", {})
+cost = {k: v for k, v in metrics.items() if k.startswith("cost/")}
+print("\n[cost] LLM (the agent's own model):")
+for f in ("calls", "prompt_tokens", "cached_tokens", "completion_tokens", "reasoning_tokens", "total_tokens"):
+    print(f"    cost/llm/{f:16s} = {cost.get(f'cost/llm/{f}', 0)}")
+print("[cost] Tools (downstream generation):")
+tool_keys = sorted(k for k in cost if k.startswith("cost/tool/"))
+if tool_keys:
+    for k in tool_keys:
+        print(f"    {k:40s} = {cost[k]}")
+else:
+    print("    (no tool usage reported)")
 
 final_film = workspace / "final.mp4"
 print(

@@ -110,9 +110,16 @@ class AgentChatModel:
             metrics["num_preempted"] = token_output.num_preempted if token_output.num_preempted is not None else -1
         else:
             metrics["num_preempted"] += token_output.num_preempted if token_output.num_preempted is not None else 0
+        _prompt_tokens = len(prompt_ids)
+        _completion_tokens = len(token_output.token_ids)
         generation_info = {
-            "prompt_tokens": len(prompt_ids),
-            "completion_tokens": len(token_output.token_ids),
+            "prompt_tokens": _prompt_tokens,
+            "completion_tokens": _completion_tokens,
+            # cached/reasoning are not modelled on the token-in-token-out
+            # training path; keep the keys for uniform cost accounting.
+            "cached_tokens": 0,
+            "reasoning_tokens": 0,
+            "total_tokens": _prompt_tokens + _completion_tokens,
         }
         response_ids = token_output.token_ids
         rollout_cache["prompt_ids"] += response_ids
@@ -196,6 +203,41 @@ class AgentChatModel:
                 return text_before_message_ids[i + 1 :]
 
         return []
+
+
+def _extract_openai_usage(usage, *, fallback_completion: str = "") -> dict[str, int]:
+    """Break an OpenAI ChatCompletion ``usage`` object into a flat cost dict.
+
+    Surfaces the fine-grained breakdown when the endpoint provides it:
+    ``prompt_tokens`` (input), ``completion_tokens`` (output),
+    ``cached_tokens`` (cached-input subset of the prompt, from prompt
+    caching), ``reasoning_tokens`` (subset of completion, for reasoning
+    models), and ``total_tokens``. Missing fields default to 0 so downstream
+    accumulation stays uniform across endpoints.
+    """
+    if usage is None:
+        completion = max(len(fallback_completion.split()), 1)
+        return {
+            "prompt_tokens": 0,
+            "completion_tokens": completion,
+            "cached_tokens": 0,
+            "reasoning_tokens": 0,
+            "total_tokens": completion,
+        }
+    prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+    completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+    ptd = getattr(usage, "prompt_tokens_details", None)
+    ctd = getattr(usage, "completion_tokens_details", None)
+    cached_tokens = int((getattr(ptd, "cached_tokens", 0) or 0) if ptd is not None else 0)
+    reasoning_tokens = int((getattr(ctd, "reasoning_tokens", 0) or 0) if ctd is not None else 0)
+    total_tokens = int(getattr(usage, "total_tokens", 0) or 0) or (prompt_tokens + completion_tokens)
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "cached_tokens": cached_tokens,
+        "reasoning_tokens": reasoning_tokens,
+        "total_tokens": total_tokens,
+    }
 
 
 # this class is only used for Inference-Only Scenario
@@ -332,15 +374,10 @@ class OpenAICompatibleChatModel:
             for tool_call in response_tool_calls
         ]
 
-        usage = chat_completion.usage
-        completion_tokens = usage.completion_tokens if usage is not None else max(len(response_content.split()), 1)
-        prompt_tokens = usage.prompt_tokens if usage is not None else 0
+        generation_info = _extract_openai_usage(chat_completion.usage, fallback_completion=response_content)
         return (
             response_content,
             serialized_tool_calls,
             rollout_cache,
-            {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-            },
+            generation_info,
         )
