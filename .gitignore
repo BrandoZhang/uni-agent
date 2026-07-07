@@ -129,3 +129,6 @@ logs
 log
 outputs
 .history
+
+# creation_agent runtime cost ledger
+media_usage.jsonl

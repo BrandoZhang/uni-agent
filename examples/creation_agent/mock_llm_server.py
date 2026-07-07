@@ -1,0 +1,170 @@
+"""A minimal OpenAI-compatible chat-completions server that *scripts* a
+storyboard, so the full ``AgentInteraction`` loop can be driven end-to-end
+without a GPU or a real model.
+
+There is no GPU in many sandboxes, and a real tool-calling model on CPU is
+impractical for a demo. This server stands in for the LLM: on each
+``POST /v1/chat/completions`` it looks at how many assistant turns have
+already happened and returns the *next* scripted tool call (OpenAI
+``tool_calls`` shape). That exercises the real loop: tool parsing, the bash
+runtime, the media CLIs, the usage ledger, and the ``finish`` end-of-turn.
+
+To run against a REAL model instead, ignore this file and point
+``demo.py`` at any OpenAI-compatible tool-calling endpoint via ``BASE_URL``
+(e.g. a vLLM server: ``vllm serve <model> --enable-auto-tool-choice
+--tool-call-parser hermes``).
+
+The script deliberately keeps 2 short shots at 480p to keep cost low.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+def _skill_location(messages: list[dict]) -> str | None:
+    """Pull the video-storyboard SKILL.md path out of the injected manifest."""
+    for m in messages:
+        if m.get("role") == "system":
+            hit = re.search(r"<location>([^<]*video-storyboard[^<]*SKILL\.md)</location>", m.get("content") or "")
+            if hit:
+                return hit.group(1)
+    return None
+
+
+def build_script(workspace: str, skill_location: str | None) -> list[dict]:
+    """The ordered list of (name, arguments) tool calls the 'model' will emit."""
+    ws = workspace.rstrip("/")
+    read_skill = (
+        {"name": "execute_bash", "arguments": {"command": f"cat {skill_location}"}}
+        if skill_location
+        else {"name": "execute_bash", "arguments": {"command": f"ls -la {ws}"}}
+    )
+    return [
+        read_skill,
+        {
+            "name": "text2image",
+            "arguments": {
+                "prompt": "A lone silver-suited astronaut on a red alien dune, cinematic teal-and-orange grade",
+                "output": f"{ws}/ref_hero.png",
+                "seed": 7,
+            },
+        },
+        {
+            "name": "image2video",
+            "arguments": {
+                "first_frame": f"{ws}/ref_hero.png",
+                "prompt": "the astronaut slowly turns toward camera, gentle push-in",
+                "output": f"{ws}/shot1.mp4",
+                "seconds": 3,
+                "resolution": "480p",
+                "seed": 7,
+            },
+        },
+        {
+            "name": "text2video",
+            "arguments": {
+                "prompt": "wide establishing shot of twin suns setting over the alien desert at dusk",
+                "output": f"{ws}/shot2.mp4",
+                "seconds": 3,
+                "resolution": "480p",
+                "seed": 8,
+            },
+        },
+        {
+            "name": "concat_video",
+            "arguments": {"inputs": [f"{ws}/shot1.mp4", f"{ws}/shot2.mp4"], "output": f"{ws}/final.mp4"},
+        },
+        {"name": "media_usage", "arguments": {}},
+        {
+            "name": "finish",
+            "arguments": {
+                "answer": (
+                    "Done. Storyboard: (1) image2video of the hero astronaut from a locked "
+                    f"reference frame, (2) text2video establishing shot. Final film: {ws}/final.mp4. "
+                    "Cross-shot consistency came from ref_hero.png used as shot 1's first frame. "
+                    "See the media_usage output above for the total token cost."
+                )
+            },
+        },
+    ]
+
+
+class _Handler(BaseHTTPRequestHandler):
+    workspace = "/tmp/creation"
+
+    def log_message(self, *args):  # silence default logging
+        pass
+
+    def _json(self, code: int, payload: dict) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):  # noqa: N802 - health/models probes
+        if self.path.rstrip("/").endswith("/models"):
+            self._json(200, {"object": "list", "data": [{"id": "mock-director", "object": "model"}]})
+        else:
+            self._json(200, {"status": "ok"})
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("Content-Length", "0"))
+        try:
+            req = json.loads(self.rfile.read(length) or b"{}")
+        except json.JSONDecodeError:
+            self._json(400, {"error": {"message": "invalid JSON"}})
+            return
+
+        messages = req.get("messages", [])
+        n_assistant = sum(1 for m in messages if m.get("role") == "assistant")
+        script = build_script(self.workspace, _skill_location(messages))
+        step = script[n_assistant] if n_assistant < len(script) else script[-1]
+
+        tool_call = {
+            "id": f"call_{n_assistant}",
+            "type": "function",
+            "function": {"name": step["name"], "arguments": json.dumps(step["arguments"], ensure_ascii=False)},
+        }
+        message = {
+            "role": "assistant",
+            "content": f"[director step {n_assistant}] calling {step['name']}",
+            "tool_calls": [tool_call],
+        }
+        self._json(
+            200,
+            {
+                "id": f"chatcmpl-mock-{n_assistant}",
+                "object": "chat.completion",
+                "created": 0,
+                "model": req.get("model", "mock-director"),
+                "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls"}],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            },
+        )
+
+
+def start_server(workspace: str, host: str = "127.0.0.1", port: int = 0) -> tuple[ThreadingHTTPServer, str]:
+    """Start the scripted server in a daemon thread. Returns (server, base_url)."""
+    _Handler.workspace = workspace
+    httpd = ThreadingHTTPServer((host, port), _Handler)
+    actual_port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, f"http://{host}:{actual_port}/v1"
+
+
+if __name__ == "__main__":
+    import os
+
+    ws = os.getenv("MEDIA_WORKSPACE", "/tmp/creation")
+    srv, base = start_server(ws, port=int(os.getenv("MOCK_LLM_PORT", "8123")))
+    print(f"mock LLM (scripted storyboard) serving at {base}  workspace={ws}")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass

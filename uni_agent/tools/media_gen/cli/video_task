@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+"""video_task: query or cancel an async video-generation task (volc backend).
+
+The video CLIs block until the task finishes, so you normally don't need
+this. Use it to check on / cancel a long-running task by id (cancelling a
+queued task is a way to cut cost).
+
+Parameters:
+  --op (string, required): query | cancel.
+  --id (string, required): the task id (as returned by the Ark API).
+  --backend (string, optional): mock (no async tasks) or volc.
+"""
+import argparse
+import json
+import pathlib
+import sys
+
+try:
+    from uni_agent.tools.media_gen import mediakit
+except ImportError:
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+    import mediakit  # type: ignore
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Query or cancel an async video task.")
+    ap.add_argument("--op", required=True, choices=["query", "cancel"])
+    ap.add_argument("--id", required=True)
+    ap.add_argument("--backend", default=None)
+    args = ap.parse_args()
+    try:
+        out = mediakit.get_backend(args.backend).video_task(op=args.op, task_id=args.id)
+    except mediakit.MediaError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    print(json.dumps(out, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

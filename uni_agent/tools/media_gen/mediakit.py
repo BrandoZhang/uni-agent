@@ -1,0 +1,600 @@
+"""Shared implementation for the multimodal *creation* tools.
+
+Single source of truth behind the CLI executables in ``cli/``
+(``text2image``, ``image2image``, ``text2video``, ``image2video``,
+``ref2video``, ``concat_video``, ``video_task``, ``media_usage``).
+
+Two backends implement the same :class:`Backend` protocol:
+
+* :class:`MockBackend` (default): fully offline. Draws placeholder images
+  with Pillow (the prompt is baked into the frame) and turns them into
+  short clips with ffmpeg. Deterministic given ``(prompt, seed)``.
+* :class:`VolcBackend` (opt-in): calls Volcengine's **Ark** API
+  (``https://ark.cn-beijing.volces.com/api/v3``) with **API-Key (Bearer)**
+  auth. Image generation is synchronous (``/images/generations``); video
+  generation is an async task (``/contents/generations/tasks`` create ->
+  poll -> optional cancel). Covers text->image, (multi-)image reference
+  ->image, group images, text->video, image->video (first / first+last
+  frame), and multimodal-reference->video (images+videos+audio).
+
+Every generation records a line to a **usage ledger** (JSONL) so cost can
+be tracked and used as an evaluation metric. The mock backend synthesizes
+token counts with the same formulas the real API documents, so the
+cost-tracking path is exercised offline.
+
+Refs:
+- image: https://www.volcengine.com/docs/82379/1541523
+- video create: https://www.volcengine.com/docs/82379/1520757
+- video query:  https://www.volcengine.com/docs/82379/1521309
+- video cancel: https://www.volcengine.com/docs/82379/1521720
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import os
+import shutil
+import struct
+import subprocess
+import tempfile
+import textwrap
+import time
+import urllib.error
+import urllib.request
+import zlib
+from dataclasses import dataclass, field
+from pathlib import Path
+
+# --------------------------------------------------------------------------
+# constants / small helpers
+# --------------------------------------------------------------------------
+
+DEFAULT_W = 768
+DEFAULT_H = 432  # 16:9
+DEFAULT_VIDEO_SECONDS = 5
+DEFAULT_FPS = 24
+MOCK_RENDER_H = 360  # mock clips render small (fast); billed at requested resolution
+
+ARK_BASE_URL = os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
+
+# Video resolution/ratio -> (w, h). Used for cost accounting (tokens ~ pixels).
+_VIDEO_DIMS: dict[str, dict[str, tuple[int, int]]] = {
+    "480p": {"16:9": (864, 480), "9:16": (480, 864), "1:1": (640, 640), "4:3": (736, 544), "3:4": (544, 736), "21:9": (960, 416)},
+    "720p": {"16:9": (1280, 720), "9:16": (720, 1280), "1:1": (960, 960), "4:3": (1120, 832), "3:4": (832, 1120), "21:9": (1504, 640)},
+    "1080p": {"16:9": (1920, 1080), "9:16": (1080, 1920), "1:1": (1440, 1440), "4:3": (1664, 1248), "3:4": (1248, 1664), "21:9": (2176, 928)},
+}
+
+
+class MediaError(RuntimeError):
+    """Raised for any recoverable failure so the CLI can print a clean message."""
+
+
+def _seed_int(prompt: str, seed: int | None) -> int:
+    h = hashlib.sha256(f"{seed}:{prompt}".encode()).hexdigest()
+    return int(h[:8], 16)
+
+
+def _palette(prompt: str, seed: int | None) -> tuple[int, int, int]:
+    n = _seed_int(prompt, seed)
+    return 40 + (n & 0x7F), 40 + ((n >> 7) & 0x7F), 40 + ((n >> 14) & 0x7F)
+
+
+def _ensure_parent(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def video_dims(resolution: str, ratio: str) -> tuple[int, int]:
+    """Best-effort (w, h) for a resolution+ratio, for cost accounting."""
+    res = _VIDEO_DIMS.get(resolution, _VIDEO_DIMS["720p"])
+    if ratio == "adaptive":
+        ratio = "16:9"
+    return res.get(ratio, res["16:9"])
+
+
+# --------------------------------------------------------------------------
+# usage ledger (cost tracking)
+# --------------------------------------------------------------------------
+
+
+def usage_log_path() -> Path:
+    """Where usage lines are appended. ``$MEDIA_USAGE_LOG`` or ``./media_usage.jsonl``."""
+    return Path(os.getenv("MEDIA_USAGE_LOG", "media_usage.jsonl")).expanduser()
+
+
+def record_usage(entry: dict) -> None:
+    """Append one usage record (JSONL). Best-effort: never raises."""
+    try:
+        entry = {"ts": round(time.time(), 3), **entry}
+        path = usage_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:  # noqa: BLE001 - accounting must never break generation
+        pass
+
+
+def summarize_usage(path: Path | None = None) -> dict:
+    """Aggregate the ledger into totals (the cost metric)."""
+    path = path or usage_log_path()
+    totals = {
+        "calls": 0,
+        "images_generated": 0,
+        "video_seconds": 0,
+        "total_tokens": 0,
+        "by_tool": {},
+        "by_backend": {},
+    }
+    if not path.is_file():
+        return totals
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            e = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        totals["calls"] += 1
+        totals["images_generated"] += int(e.get("generated_images", 0) or 0)
+        totals["video_seconds"] += int(e.get("seconds", 0) or 0)
+        tok = int(e.get("total_tokens", 0) or 0)
+        totals["total_tokens"] += tok
+        totals["by_tool"][e.get("tool", "?")] = totals["by_tool"].get(e.get("tool", "?"), 0) + tok
+        totals["by_backend"][e.get("backend", "?")] = totals["by_backend"].get(e.get("backend", "?"), 0) + tok
+    return totals
+
+
+# --------------------------------------------------------------------------
+# ffmpeg + Pillow helpers
+# --------------------------------------------------------------------------
+
+
+def ffmpeg_exe() -> str:
+    exe = shutil.which("ffmpeg")
+    if exe:
+        return exe
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception as exc:  # noqa: BLE001
+        raise MediaError(
+            "ffmpeg not found. Install it (`apt install ffmpeg`) or `pip install imageio-ffmpeg`."
+        ) from exc
+
+
+def _run_ffmpeg(args: list[str]) -> None:
+    cmd = [ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error", *args]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        tail = (proc.stderr or "").strip().splitlines()[-8:]
+        raise MediaError("ffmpeg failed:\n" + "\n".join(tail))
+
+
+def _write_solid_png(path: Path, w: int, h: int, rgb: tuple[int, int, int]) -> None:
+    r, g, b = rgb
+    raw = bytearray()
+    row = bytes([r, g, b]) * w
+    for _ in range(h):
+        raw.append(0)
+        raw.extend(row)
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+    path.write_bytes(
+        b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(bytes(raw), 9)) + chunk(b"IEND", b"")
+    )
+
+
+def _draw_caption_image(
+    path: Path, *, title: str, prompt: str, w: int, h: int, rgb: tuple[int, int, int], base_image: Path | None = None
+) -> None:
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        _write_solid_png(path, w, h, rgb)
+        return
+
+    if base_image is not None and Path(base_image).is_file():
+        img = Image.open(base_image).convert("RGB")
+        sw, sh = img.size
+        scale = max(w / sw, h / sh)
+        img = img.resize((max(1, int(sw * scale)), max(1, int(sh * scale))))
+        left, top = (img.size[0] - w) // 2, (img.size[1] - h) // 2
+        img = img.crop((left, top, left + w, top + h))
+        img = Image.blend(img, Image.new("RGB", (w, h), (10, 10, 15)), 0.35)
+    else:
+        img = Image.new("RGB", (w, h), rgb)
+
+    draw = ImageDraw.Draw(img)
+
+    def font(size: int):
+        try:
+            return ImageFont.load_default(size=size)
+        except TypeError:
+            return ImageFont.load_default()
+
+    draw.rectangle([0, 0, w, 46], fill=(0, 0, 0))
+    draw.text((16, 12), title, fill=(255, 220, 120), font=font(24))
+    body = textwrap.fill(prompt.strip(), width=max(20, w // 12))[:600]
+    draw.multiline_text((16, 64), body, fill=(240, 240, 240), font=font(22), spacing=6)
+    draw.text((16, h - 30), f"{w}x{h} · placeholder (mock backend)", fill=(180, 180, 180), font=font(16))
+    img.save(path)
+
+
+def _image_to_clip(image: Path, out: Path, *, seconds: int, fps: int, w: int, h: int) -> None:
+    _ensure_parent(out)
+    total = max(1, seconds * fps)
+    vf = f"scale={w * 2}:{h * 2},zoompan=z='min(zoom+0.0012,1.12)':d={total}:s={w}x{h}:fps={fps},format=yuv420p"
+    try:
+        _run_ffmpeg(["-loop", "1", "-i", str(image), "-t", str(seconds), "-r", str(fps), "-vf", vf,
+                     "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", str(out)])
+    except MediaError:
+        _run_ffmpeg(["-loop", "1", "-i", str(image), "-t", str(seconds), "-r", str(fps),
+                     "-vf", f"scale={w}:{h},format=yuv420p", "-c:v", "libx264", "-preset", "veryfast",
+                     "-pix_fmt", "yuv420p", str(out)])
+
+
+def concat_clips(inputs: list[Path], out: Path, *, w: int = DEFAULT_W, h: int = DEFAULT_H, fps: int = DEFAULT_FPS) -> Path:
+    inputs = [Path(p) for p in inputs]
+    for p in inputs:
+        if not p.is_file():
+            raise MediaError(f"input clip not found: {p}")
+    if not inputs:
+        raise MediaError("concat needs at least one input clip")
+    _ensure_parent(out)
+    args: list[str] = []
+    for p in inputs:
+        args += ["-i", str(p)]
+    filters, labels = [], ""
+    for i in range(len(inputs)):
+        filters.append(f"[{i}:v]scale={w}:{h},fps={fps},format=yuv420p,setsar=1[v{i}]")
+        labels += f"[v{i}]"
+    fc = ";".join(filters) + f";{labels}concat=n={len(inputs)}:v=1:a=0[outv]"
+    args += ["-filter_complex", fc, "-map", "[outv]", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", str(out)]
+    _run_ffmpeg(args)
+    return out
+
+
+# --------------------------------------------------------------------------
+# result + backend protocol
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class GenResult:
+    path: Path
+    backend: str
+    kind: str  # image | video
+    usage: dict = field(default_factory=dict)
+    meta: dict = field(default_factory=dict)
+    extra_paths: list[str] = field(default_factory=list)
+
+    def to_json(self) -> str:
+        return json.dumps(
+            {
+                "ok": True,
+                "kind": self.kind,
+                "path": str(self.path),
+                "backend": self.backend,
+                "bytes": self.path.stat().st_size if self.path.is_file() else 0,
+                "usage": self.usage,
+                "extra_paths": self.extra_paths,
+                "meta": self.meta,
+            },
+            ensure_ascii=False,
+        )
+
+
+class Backend:
+    name = "base"
+
+    def text2image(self, *, prompt, out, width, height, seed, max_images=1): ...
+    def image2image(self, *, prompt, images, out, strength, seed, max_images=1): ...
+    def text2video(self, *, prompt, out, seconds, resolution, ratio, seed, camera_fixed, watermark, generate_audio): ...
+    def image2video(self, *, prompt, first_frame, last_frame, out, seconds, resolution, ratio, seed, camera_fixed, watermark, generate_audio, return_last_frame): ...
+    def ref2video(self, *, prompt, images, videos, audios, out, seconds, resolution, ratio, seed, watermark, generate_audio): ...
+    def video_task(self, *, op, task_id) -> dict: ...
+
+
+# --------------------------------------------------------------------------
+# Mock backend (offline, default)
+# --------------------------------------------------------------------------
+
+
+def _mock_image_tokens(w: int, h: int, n: int) -> dict:
+    # image output_tokens = generated_images * floor(w*h/256)  (per Ark docs)
+    per = (w * h) // 256
+    return {"generated_images": n, "output_tokens": per * n, "total_tokens": per * n}
+
+
+def _mock_video_tokens(w: int, h: int, seconds: int) -> dict:
+    # synthetic: completion_tokens ~ floor(pixels * seconds / 1024)
+    tok = (w * h * seconds) // 1024
+    return {"completion_tokens": tok, "total_tokens": tok}
+
+
+class MockBackend(Backend):
+    name = "mock"
+
+    def _img(self, title, prompt, out, w, h, seed, base=None, n=1):
+        out = Path(out)
+        _ensure_parent(out)
+        _draw_caption_image(out, title=title, prompt=prompt, w=w, h=h, rgb=_palette(prompt, seed), base_image=base)
+        extra = []
+        for i in range(2, n + 1):  # group images
+            p = out.with_name(f"{out.stem}_{i}{out.suffix}")
+            _draw_caption_image(p, title=f"{title} ({i}/{n})", prompt=prompt, w=w, h=h, rgb=_palette(prompt + str(i), seed), base_image=base)
+            extra.append(str(p))
+        usage = _mock_image_tokens(w, h, n)
+        record_usage({"tool": title.split()[-1], "backend": self.name, "kind": "image", "generated_images": n, **usage})
+        return GenResult(out, self.name, "image", usage=usage, meta={"prompt": prompt, "seed": seed, "size": [w, h]}, extra_paths=extra)
+
+    def text2image(self, *, prompt, out, width, height, seed, max_images=1):
+        return self._img("mock text2image", prompt, out, width, height, seed, n=max_images)
+
+    def image2image(self, *, prompt, images, out, strength, seed, max_images=1):
+        images = [Path(p) for p in (images or [])]
+        for p in images:
+            if not p.is_file():
+                raise MediaError(f"reference image not found: {p}")
+        base = images[0] if images else None
+        r = self._img("mock image2image", prompt, out, DEFAULT_W, DEFAULT_H, seed, base=base, n=max_images)
+        r.meta.update({"refs": [str(p) for p in images], "strength": strength})
+        return r
+
+    def _video(self, title, prompt, out, seconds, resolution, ratio, seed, base=None, return_last_frame=False):
+        out = Path(out)
+        _ensure_parent(out)
+        bw, bh = video_dims(resolution, ratio)  # billed dims
+        rh = min(MOCK_RENDER_H, bh)
+        rw = max(2, (bw * rh // bh) // 2 * 2)  # keep even
+        with tempfile.TemporaryDirectory() as td:
+            frame = Path(td) / "frame.png"
+            _draw_caption_image(frame, title=title, prompt=prompt, w=rw, h=rh, rgb=_palette(prompt, seed), base_image=base)
+            _image_to_clip(frame, out, seconds=seconds, fps=DEFAULT_FPS, w=rw, h=rh)
+        extra = []
+        if return_last_frame:
+            lf = out.with_name(f"{out.stem}_lastframe.png")
+            _draw_caption_image(lf, title=f"{title} · last frame", prompt=prompt, w=rw, h=rh, rgb=_palette(prompt, seed), base_image=base)
+            extra.append(str(lf))
+        usage = _mock_video_tokens(bw, bh, seconds)  # bill at requested resolution
+        record_usage({"tool": title.split()[-1], "backend": self.name, "kind": "video", "seconds": seconds, "resolution": resolution, **usage})
+        return GenResult(out, self.name, "video", usage=usage,
+                         meta={"prompt": prompt, "seconds": seconds, "seed": seed, "resolution": resolution, "ratio": ratio, "render_size": [rw, rh]},
+                         extra_paths=extra)
+
+    def text2video(self, *, prompt, out, seconds, resolution, ratio, seed, camera_fixed, watermark, generate_audio):
+        return self._video("mock text2video", prompt, out, seconds, resolution, ratio, seed)
+
+    def image2video(self, *, prompt, first_frame, last_frame, out, seconds, resolution, ratio, seed, camera_fixed, watermark, generate_audio, return_last_frame):
+        ff = Path(first_frame)
+        if not ff.is_file():
+            raise MediaError(f"first-frame image not found: {ff}")
+        note = prompt + (f"  [+last_frame:{Path(last_frame).name}]" if last_frame else "")
+        return self._video("mock image2video", note, out, seconds, resolution, ratio, seed, base=ff, return_last_frame=return_last_frame)
+
+    def ref2video(self, *, prompt, images, videos, audios, out, seconds, resolution, ratio, seed, watermark, generate_audio):
+        images = [Path(p) for p in (images or [])]
+        base = images[0] if images and images[0].is_file() else None
+        tag = f"  [refs img:{len(images)} vid:{len(videos or [])} aud:{len(audios or [])}]"
+        return self._video("mock ref2video", prompt + tag, out, seconds, resolution, ratio, seed, base=base)
+
+    def video_task(self, *, op, task_id) -> dict:
+        return {"ok": True, "backend": self.name, "op": op, "task_id": task_id,
+                "note": "mock backend generates videos synchronously; there is no async task to query/cancel."}
+
+
+# --------------------------------------------------------------------------
+# Volcengine Ark backend (opt-in). API-Key (Bearer) auth.
+# --------------------------------------------------------------------------
+
+
+def _env(*names: str, default: str | None = None) -> str | None:
+    for n in names:
+        v = os.getenv(n)
+        if v:
+            return v
+    return default
+
+
+def _data_uri(path: Path, media: str = "image") -> str:
+    """Encode a local file as a ``data:<media>/<ext>;base64,...`` URI."""
+    path = Path(path)
+    ext = path.suffix.lstrip(".").lower() or ("png" if media == "image" else "mp4")
+    if ext == "jpg":
+        ext = "jpeg"
+    return f"data:{media}/{ext};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
+
+
+def _as_url_or_datauri(ref: str, media: str) -> str:
+    """Pass through http(s)/asset URIs; base64-encode local files."""
+    if ref.startswith(("http://", "https://", "asset://", "data:")):
+        return ref
+    return _data_uri(Path(ref), media)
+
+
+class VolcBackend(Backend):
+    """Volcengine Ark API backend (API-Key / Bearer auth).
+
+    Model IDs change over time and must be opened in your console; set them
+    via env (``VOLC_IMAGE_MODEL`` / ``VOLC_VIDEO_MODEL``). The defaults are
+    placeholders — override them with the exact Model IDs shown for your
+    account (https://www.volcengine.com/docs/82379/1330310).
+    """
+
+    name = "volc"
+
+    def __init__(self) -> None:
+        self.api_key = _env("ARK_API_KEY", "VOLC_API_KEY", "VOLCENGINE_API_KEY")
+        if not self.api_key:
+            raise MediaError("Volc backend needs an Ark API key: set ARK_API_KEY (long-lived key from the Volcengine console).")
+        self.base = ARK_BASE_URL.rstrip("/")
+        self.image_model = _env("VOLC_IMAGE_MODEL", default="doubao-seedream-4-0-250828")
+        self.video_model = _env("VOLC_VIDEO_MODEL", default="doubao-seedance-1-0-pro-250528")
+        self.poll_interval = float(_env("VOLC_POLL_INTERVAL", default="5") or 5)
+        self.poll_timeout = float(_env("VOLC_POLL_TIMEOUT", default="900") or 900)
+
+    # ---- HTTP ----
+    def _request(self, method: str, path: str, body: dict | None = None) -> dict:
+        url = f"{self.base}{path}"
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method)
+        req.add_header("Authorization", f"Bearer {self.api_key}")
+        req.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                raw = resp.read().decode("utf-8")
+                return json.loads(raw) if raw else {}
+        except urllib.error.HTTPError as e:
+            raise MediaError(f"Ark API HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:500]}") from None
+        except Exception as exc:  # noqa: BLE001
+            raise MediaError(f"Ark API request failed: {exc}") from None
+
+    @staticmethod
+    def _download(url: str, out: Path) -> Path:
+        _ensure_parent(out)
+        with urllib.request.urlopen(url, timeout=180) as resp:  # noqa: S310
+            out.write_bytes(resp.read())
+        return out
+
+    # ---- images ----
+    def _images_generation(self, *, prompt, images, out, size, max_images, tool):
+        out = Path(out)
+        body: dict = {"model": self.image_model, "prompt": prompt, "size": size, "response_format": "url", "watermark": False}
+        if images:
+            enc = [_as_url_or_datauri(str(p), "image") for p in images]
+            body["image"] = enc if len(enc) > 1 else enc[0]
+        if max_images and max_images > 1:
+            body["sequential_image_generation"] = "auto"
+            body["sequential_image_generation_options"] = {"max_images": max_images}
+        else:
+            body["sequential_image_generation"] = "disabled"
+        data = self._request("POST", "/images/generations", body)
+        items = [d for d in (data.get("data") or []) if d.get("url") or d.get("b64_json")]
+        if not items:
+            raise MediaError(f"Ark image response had no images: {json.dumps(data)[:400]}")
+        self._save_image_item(items[0], out)
+        extra = []
+        for i, it in enumerate(items[1:], start=2):
+            p = out.with_name(f"{out.stem}_{i}{out.suffix}")
+            self._save_image_item(it, p)
+            extra.append(str(p))
+        usage = data.get("usage") or {}
+        record_usage({"tool": tool, "backend": self.name, "model": self.image_model, "kind": "image",
+                      "generated_images": usage.get("generated_images", len(items)),
+                      "output_tokens": usage.get("output_tokens", 0), "total_tokens": usage.get("total_tokens", 0)})
+        return GenResult(out, self.name, "image", usage=usage, meta={"prompt": prompt, "model": self.image_model, "size": size}, extra_paths=extra)
+
+    @staticmethod
+    def _save_image_item(item: dict, out: Path) -> None:
+        _ensure_parent(out)
+        if item.get("b64_json"):
+            out.write_bytes(base64.b64decode(item["b64_json"]))
+        elif item.get("url"):
+            VolcBackend._download(item["url"], out)
+
+    def text2image(self, *, prompt, out, width, height, seed, max_images=1):
+        return self._images_generation(prompt=prompt, images=None, out=out, size=f"{width}x{height}", max_images=max_images, tool="text2image")
+
+    def image2image(self, *, prompt, images, out, strength, seed, max_images=1):
+        return self._images_generation(prompt=prompt, images=[Path(p) for p in (images or [])], out=out, size="2K", max_images=max_images, tool="image2image")
+
+    # ---- video (async task) ----
+    def _create_video_task(self, *, content: list[dict], seconds, resolution, ratio, seed, camera_fixed=False, watermark=False, generate_audio=None, return_last_frame=False) -> str:
+        body: dict = {"model": self.video_model, "content": content, "resolution": resolution, "ratio": ratio,
+                      "duration": seconds, "camera_fixed": camera_fixed, "watermark": watermark}
+        if seed is not None and seed >= 0:
+            body["seed"] = seed
+        if generate_audio is not None:
+            body["generate_audio"] = generate_audio
+        if return_last_frame:
+            body["return_last_frame"] = True
+        data = self._request("POST", "/contents/generations/tasks", body)
+        task_id = data.get("id")
+        if not task_id:
+            raise MediaError(f"Ark video create returned no task id: {json.dumps(data)[:400]}")
+        return task_id
+
+    def _poll_video(self, task_id: str, out: Path, *, tool: str, seconds: int, resolution: str) -> GenResult:
+        out = Path(out)
+        deadline = time.monotonic() + self.poll_timeout
+        while time.monotonic() < deadline:
+            res = self._request("GET", f"/contents/generations/tasks/{task_id}")
+            status = str(res.get("status", "")).lower()
+            if status == "succeeded":
+                content = res.get("content") or {}
+                if not content.get("video_url"):
+                    raise MediaError(f"Ark task {task_id} succeeded but no video_url: {json.dumps(res)[:400]}")
+                self._download(content["video_url"], out)
+                extra = []
+                if content.get("last_frame_url"):
+                    lf = out.with_name(f"{out.stem}_lastframe.png")
+                    self._download(content["last_frame_url"], lf)
+                    extra.append(str(lf))
+                usage = res.get("usage") or {}
+                record_usage({"tool": tool, "backend": self.name, "model": self.video_model, "kind": "video",
+                              "seconds": res.get("duration", seconds), "resolution": res.get("resolution", resolution),
+                              "completion_tokens": usage.get("completion_tokens", 0), "total_tokens": usage.get("total_tokens", 0)})
+                return GenResult(out, self.name, "video", usage=usage,
+                                 meta={"task_id": task_id, "model": self.video_model, "resolution": res.get("resolution", resolution), "ratio": res.get("ratio")},
+                                 extra_paths=extra)
+            if status in ("failed", "cancelled", "expired"):
+                raise MediaError(f"Ark video task {task_id} {status}: {json.dumps(res.get('error') or res)[:400]}")
+            time.sleep(self.poll_interval)
+        raise MediaError(f"Ark video task {task_id} timed out after {self.poll_timeout}s (id={task_id}; cancel with video_task)")
+
+    def text2video(self, *, prompt, out, seconds, resolution, ratio, seed, camera_fixed, watermark, generate_audio):
+        content = [{"type": "text", "text": prompt}]
+        tid = self._create_video_task(content=content, seconds=seconds, resolution=resolution, ratio=ratio, seed=seed, camera_fixed=camera_fixed, watermark=watermark, generate_audio=generate_audio)
+        return self._poll_video(tid, out, tool="text2video", seconds=seconds, resolution=resolution)
+
+    def image2video(self, *, prompt, first_frame, last_frame, out, seconds, resolution, ratio, seed, camera_fixed, watermark, generate_audio, return_last_frame):
+        content: list[dict] = [{"type": "image_url", "image_url": {"url": _as_url_or_datauri(str(first_frame), "image")}, "role": "first_frame"}]
+        if last_frame:
+            content.append({"type": "image_url", "image_url": {"url": _as_url_or_datauri(str(last_frame), "image")}, "role": "last_frame"})
+        if prompt:
+            content.append({"type": "text", "text": prompt})
+        tid = self._create_video_task(content=content, seconds=seconds, resolution=resolution, ratio=ratio, seed=seed, camera_fixed=camera_fixed, watermark=watermark, generate_audio=generate_audio, return_last_frame=return_last_frame)
+        return self._poll_video(tid, out, tool="image2video", seconds=seconds, resolution=resolution)
+
+    def ref2video(self, *, prompt, images, videos, audios, out, seconds, resolution, ratio, seed, watermark, generate_audio):
+        content: list[dict] = []
+        for p in images or []:
+            content.append({"type": "image_url", "image_url": {"url": _as_url_or_datauri(str(p), "image")}, "role": "reference_image"})
+        for p in videos or []:
+            content.append({"type": "video_url", "video_url": {"url": _as_url_or_datauri(str(p), "video")}, "role": "reference_video"})
+        for p in audios or []:
+            content.append({"type": "audio_url", "audio_url": {"url": _as_url_or_datauri(str(p), "audio")}, "role": "reference_audio"})
+        if not content:
+            raise MediaError("ref2video needs at least one reference image or video.")
+        if prompt:
+            content.append({"type": "text", "text": prompt})
+        tid = self._create_video_task(content=content, seconds=seconds, resolution=resolution, ratio=ratio, seed=seed, watermark=watermark, generate_audio=generate_audio)
+        return self._poll_video(tid, out, tool="ref2video", seconds=seconds, resolution=resolution)
+
+    def video_task(self, *, op, task_id) -> dict:
+        if op == "query":
+            return {"ok": True, "backend": self.name, "op": op, **self._request("GET", f"/contents/generations/tasks/{task_id}")}
+        if op == "cancel":
+            self._request("DELETE", f"/contents/generations/tasks/{task_id}")
+            return {"ok": True, "backend": self.name, "op": op, "task_id": task_id, "note": "cancel/delete requested"}
+        raise MediaError(f"unknown video_task op {op!r} (expected 'query' or 'cancel')")
+
+
+# --------------------------------------------------------------------------
+# backend selection
+# --------------------------------------------------------------------------
+
+
+def get_backend(name: str | None = None) -> Backend:
+    name = (name or os.getenv("MEDIA_BACKEND") or "mock").lower()
+    if name == "mock":
+        return MockBackend()
+    if name == "volc":
+        return VolcBackend()
+    raise MediaError(f"unknown backend {name!r} (expected 'mock' or 'volc')")

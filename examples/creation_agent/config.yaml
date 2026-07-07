@@ -1,0 +1,60 @@
+# Agent-loop config for the multimodal creation agent (UniAgentLoop path).
+#
+# This wires the SAME media tools + skill + cost-aware reward used by the
+# standalone `demo.py` into `uni_agent.agent_loop.UniAgentLoop`, i.e. the
+# large-scale / RL-training entrypoint. `demo.py` itself does NOT read this
+# file (it drives `AgentInteraction` directly and takes its endpoint from
+# env vars); this config is the bridge to running the same agent under the
+# parallel inference / training stack.
+#
+# The media tools default to the offline mock backend. For real generation,
+# set MEDIA_BACKEND=volc and ARK_API_KEY in `env.env_variables` below.
+- name: creation_agent
+
+  _target_: uni_agent.agent_loop.UniAgentLoop
+
+  concurrency: 64
+  log_dir: /tmp/creation_agent
+  mask_abnormal_exit_traj: false
+
+  interaction:
+    action_timeout: 180
+    max_turns: 30
+    chat_mode: false          # single-shot task (brief -> film), end on `finish`
+
+  env:
+    deployment:
+      type: local_native      # pexpect bash on the host; no container, no GPU
+    env_variables:
+      MEDIA_BACKEND: mock      # set to `volc` for the real Ark API
+      MEDIA_USAGE_LOG: /tmp/creation_agent/usage.jsonl
+      MEDIA_WORKSPACE: /tmp/creation_agent/workspace
+      # ARK_API_KEY: "<your-ark-key>"        # required when MEDIA_BACKEND=volc
+      # VOLC_IMAGE_MODEL: "doubao-seedream-4-0-250828"
+      # VOLC_VIDEO_MODEL: "doubao-seedance-1-0-pro-250528"
+    post_setup_cmd: "mkdir -p /tmp/creation_agent/workspace && cd /tmp/creation_agent/workspace"
+
+  # Structured (OpenAI) tool calls come back from the serving model; the
+  # parser only matters for text-format models. hermes/qwen3_coder both work.
+  tool_parser: qwen3_coder
+
+  tools:
+    - name: execute_bash
+    - name: str_replace_editor
+    - name: text2image
+    - name: image2image
+    - name: text2video
+    - name: image2video
+    - name: ref2video
+    - name: concat_video
+    - name: video_task
+    - name: media_usage
+    - name: finish
+
+  skills:
+    skills_dir: skills         # repo-root skills/ dir holds video-storyboard/
+
+  reward:
+    name: media_creation
+    cost_weight: 0.0001        # reward = quality_proxy - cost_weight * total_tokens
+    workspace: /tmp/creation_agent/workspace
