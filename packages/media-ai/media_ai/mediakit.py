@@ -35,11 +35,13 @@ import base64
 import hashlib
 import json
 import os
+import random
 import shutil
 import struct
 import subprocess
 import tempfile
 import textwrap
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -142,14 +144,22 @@ def usage_log_path() -> Path:
     return Path(os.getenv("MEDIA_USAGE_LOG", "media_usage.jsonl")).expanduser()
 
 
+_LEDGER_LOCK = threading.Lock()
+
+
 def record_usage(entry: dict) -> None:
-    """Append one usage record (JSONL). Best-effort: never raises."""
+    """Append one usage record (JSONL). Best-effort: never raises.
+
+    Guarded by a lock so concurrent (batch) generations don't interleave
+    partial lines in the ledger.
+    """
     try:
         entry = {"ts": round(time.time(), 3), **entry}
         path = usage_log_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        line = json.dumps(entry, ensure_ascii=False) + "\n"
+        with _LEDGER_LOCK, path.open("a", encoding="utf-8") as f:
+            f.write(line)
     except Exception:  # noqa: BLE001 - accounting must never break generation
         pass
 
@@ -666,20 +676,40 @@ class VolcBackend(Backend):
         self.poll_timeout = float(_env("VOLC_POLL_TIMEOUT", default="900") or 900)
 
     # ---- HTTP ----
+    # Statuses worth retrying: rate limit (429) + transient server errors.
+    _RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+
     def _request(self, method: str, path: str, body: dict | None = None) -> dict:
+        """POST/GET/DELETE against Ark with retry + exponential backoff on rate
+        limits (429) and transient 5xx. ``VOLC_MAX_RETRIES`` / ``VOLC_RETRY_BASE``
+        tune it (default 4 retries, 2s base)."""
         url = f"{self.base}{path}"
         data = json.dumps(body).encode("utf-8") if body is not None else None
-        req = urllib.request.Request(url, data=data, method=method)
-        req.add_header("Authorization", f"Bearer {self.api_key}")
-        req.add_header("Content-Type", "application/json")
-        try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                raw = resp.read().decode("utf-8")
-                return json.loads(raw) if raw else {}
-        except urllib.error.HTTPError as e:
-            raise MediaError(f"Ark API HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:500]}") from None
-        except Exception as exc:  # noqa: BLE001
-            raise MediaError(f"Ark API request failed: {exc}") from None
+        max_retries = int(os.getenv("VOLC_MAX_RETRIES", "4"))
+        base_delay = float(os.getenv("VOLC_RETRY_BASE", "2"))
+        for attempt in range(max_retries + 1):
+            req = urllib.request.Request(url, data=data, method=method)
+            req.add_header("Authorization", f"Bearer {self.api_key}")
+            req.add_header("Content-Type", "application/json")
+            try:
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    raw = resp.read().decode("utf-8")
+                    return json.loads(raw) if raw else {}
+            except urllib.error.HTTPError as e:
+                if e.code in self._RETRY_STATUSES and attempt < max_retries:
+                    # honor Retry-After when present, else exponential backoff + jitter
+                    retry_after = e.headers.get("Retry-After") if e.headers else None
+                    delay = float(retry_after) if (retry_after and retry_after.isdigit()) else base_delay * (2**attempt)
+                    time.sleep(delay + random.uniform(0, 0.5))
+                    continue
+                detail = e.read().decode("utf-8", "replace")[:500]
+                raise MediaError(f"Ark API HTTP {e.code}: {detail}") from None
+            except urllib.error.URLError as exc:
+                if attempt < max_retries:
+                    time.sleep(base_delay * (2**attempt) + random.uniform(0, 0.5))
+                    continue
+                raise MediaError(f"Ark API request failed: {exc}") from None
+        raise MediaError("Ark API request failed after retries")
 
     @staticmethod
     def _download(url: str, out: Path) -> Path:
@@ -1038,3 +1068,107 @@ def get_backend(name: str | None = None) -> Backend:
     if name == "volc":
         return VolcBackend()
     raise MediaError(f"unknown backend {name!r} (expected 'mock' or 'volc')")
+
+
+# --------------------------------------------------------------------------
+# batch fan-out / join (bounded concurrency)
+# --------------------------------------------------------------------------
+
+DEFAULT_MAX_CONCURRENT = 4
+_VIDEO_JOB_TOOLS = {"text2video", "image2video", "ref2video"}
+
+
+def _run_one_video_job(backend: Backend, job: dict) -> GenResult:
+    """Dispatch a single batch job to the right video method (blocking: each
+    job owns its worker thread through submit -> poll -> download)."""
+    tool = job.get("tool")
+    if tool not in _VIDEO_JOB_TOOLS:
+        raise MediaError(f"batch job needs tool in {sorted(_VIDEO_JOB_TOOLS)}, got {tool!r}")
+    if not job.get("output"):
+        raise MediaError("batch job needs an 'output' path")
+    common = dict(
+        out=Path(job["output"]),
+        seconds=int(job.get("seconds", DEFAULT_VIDEO_SECONDS)),
+        resolution=job.get("resolution", "480p"),
+        seed=job.get("seed"),
+        watermark=bool(job.get("watermark", False)),
+        generate_audio=job.get("generate_audio"),
+        wait=True,
+    )
+    prompt = job.get("prompt", "")
+    if tool == "text2video":
+        return backend.text2video(
+            prompt=prompt, ratio=job.get("ratio", "16:9"), camera_fixed=bool(job.get("camera_fixed", False)), **common
+        )
+    if tool == "image2video":
+        return backend.image2video(
+            prompt=prompt,
+            first_frame=job["first_frame"],
+            last_frame=job.get("last_frame"),
+            ratio=job.get("ratio", "adaptive"),
+            camera_fixed=bool(job.get("camera_fixed", False)),
+            return_last_frame=bool(job.get("return_last_frame", False)),
+            **common,
+        )
+    return backend.ref2video(
+        prompt=prompt,
+        images=job.get("images", []),
+        videos=job.get("videos", []),
+        audios=job.get("audios", []),
+        ratio=job.get("ratio", "adaptive"),
+        **common,
+    )
+
+
+def batch_videos(jobs: list[dict], *, backend: str | None = None, max_concurrent: int | None = None) -> dict:
+    """Fan out N video jobs with **bounded concurrency**, then join.
+
+    Concurrency is capped (``max_concurrent`` arg, else ``$VOLC_MAX_CONCURRENT_VIDEO``,
+    else ``DEFAULT_MAX_CONCURRENT``) so we don't exceed the provider's
+    rate/concurrency limits — combined with the retry/backoff in ``_request``
+    for transient 429s. Each job is isolated: a failure is captured and the
+    other jobs still complete (fallback), so partial success is possible.
+
+    Returns a summary with per-job results and an aggregate ``usage`` block
+    (so the interaction loop meters the batch's total cost).
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    b = get_backend(backend)
+    cap = int(max_concurrent or os.getenv("VOLC_MAX_CONCURRENT_VIDEO", "0") or DEFAULT_MAX_CONCURRENT)
+    cap = max(1, cap)
+    results: list[dict | None] = [None] * len(jobs)
+
+    def work(index: int, job: dict) -> tuple[int, dict]:
+        try:
+            res = _run_one_video_job(b, job)
+            payload = json.loads(res.to_json())
+            return index, {
+                "index": index,
+                "ok": True,
+                "path": payload.get("path"),
+                "usage": payload.get("usage", {}),
+                "extra_paths": payload.get("extra_paths", []),
+            }
+        except Exception as exc:  # noqa: BLE001 - per-job fallback
+            return index, {"index": index, "ok": False, "output": job.get("output"), "error": str(exc)}
+
+    with ThreadPoolExecutor(max_workers=cap) as pool:
+        futures = [pool.submit(work, i, j) for i, j in enumerate(jobs)]
+        for fut in as_completed(futures):
+            i, r = fut.result()
+            results[i] = r
+
+    ok = sum(1 for r in results if r and r["ok"])
+    total_tokens = sum(int((r.get("usage") or {}).get("total_tokens", 0) or 0) for r in results if r and r["ok"])
+    return {
+        "ok": ok == len(jobs),
+        "kind": "batch",
+        "backend": b.name,
+        "total": len(jobs),
+        "succeeded": ok,
+        "failed": len(jobs) - ok,
+        "max_concurrent": cap,
+        "usage": {"total_tokens": total_tokens},
+        "results": results,
+    }

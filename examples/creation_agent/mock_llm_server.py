@@ -25,12 +25,12 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
-def _skill_location(messages: list[dict], tool: str = "image2video") -> str | None:
+def _skill_location(messages: list[dict], tool: str = "batch_video") -> str | None:
     """Pull a per-tool SKILL.md path out of the injected skills manifest.
 
     Demonstrates progressive disclosure: the 'model' reads the relevant
-    tool's skill on demand. Defaults to the image2video skill (the
-    consistency tool this scripted brief leans on).
+    tool's skill on demand. Defaults to the batch_video skill (the fan-out/
+    join orchestration this scripted brief leans on).
     """
     for m in messages:
         if m.get("role") == "system":
@@ -59,24 +59,27 @@ def build_script(workspace: str, skill_location: str | None) -> list[dict]:
             },
         },
         {
-            "name": "image2video",
+            # Fan out both shots concurrently (bounded) instead of one-by-one.
+            "name": "batch_video",
             "arguments": {
-                "first_frame": f"{ws}/ref_hero.png",
-                "prompt": "the astronaut slowly turns toward camera, gentle push-in",
-                "output": f"{ws}/shot1.mp4",
-                "seconds": 3,
-                "resolution": "480p",
-                "seed": 7,
-            },
-        },
-        {
-            "name": "text2video",
-            "arguments": {
-                "prompt": "wide establishing shot of twin suns setting over the alien desert at dusk",
-                "output": f"{ws}/shot2.mp4",
-                "seconds": 3,
-                "resolution": "480p",
-                "seed": 8,
+                "max_concurrent": 2,
+                "jobs": [
+                    {
+                        "tool": "image2video",
+                        "first_frame": f"{ws}/ref_hero.png",
+                        "prompt": "the astronaut slowly turns toward camera, gentle push-in",
+                        "output": f"{ws}/shot1.mp4",
+                        "seconds": 3,
+                        "resolution": "480p",
+                    },
+                    {
+                        "tool": "text2video",
+                        "prompt": "wide establishing shot of twin suns setting over the alien desert at dusk",
+                        "output": f"{ws}/shot2.mp4",
+                        "seconds": 3,
+                        "resolution": "480p",
+                    },
+                ],
             },
         },
         {

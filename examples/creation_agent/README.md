@@ -53,6 +53,7 @@ default backend is an offline **mock** (Pillow images + ffmpeg clips);
 | `text2video`  | text → clip | `POST /contents/generations/tasks` |
 | `image2video` | first-frame (+ optional **last-frame**) → clip; `return_last_frame` to chain | `POST /contents/generations/tasks` |
 | `ref2video`   | **multimodal reference**: images(0-9)+videos(0-3)+audio(0-3)+text → clip (Seedance 2.0) | `POST /contents/generations/tasks` |
+| `batch_video` | **fan out** many shots concurrently (bounded + 429 retry), then join | N× the task endpoint |
 | `concat_video`| join per-shot clips → final film | local ffmpeg |
 | `video_task`  | query / cancel an async video task (cost control) | `GET`/`DELETE /contents/generations/tasks/{id}` |
 | `media_usage` | report accumulated token cost from the ledger | local ledger |

@@ -125,6 +125,7 @@ tool_names = [
     "text2video",
     "image2video",
     "ref2video",
+    "batch_video",
     "concat_video",
     "video_task",
     "media_usage",

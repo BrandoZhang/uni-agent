@@ -44,3 +44,5 @@ redundant regenerations. Check `usage`.
 
 ## Async (long videos)
 Real video generation can take minutes. To avoid blocking, submit with `--wait false` (volc backend): it returns a `task_id` immediately. Then poll with `video_task --op query --id <task_id> --output <path>`, which downloads the clip once the task succeeds. Cancel a queued task with `video_task --op cancel --id <task_id>` to save cost. (The mock backend is synchronous and ignores `--wait`.)
+
+For **multiple shots**, prefer the `batch_video` tool (concurrent fan-out/join with a concurrency cap + retry) over calling this one repeatedly — see its skill.

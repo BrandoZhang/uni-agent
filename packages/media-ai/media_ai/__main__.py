@@ -9,6 +9,7 @@ from __future__ import annotations
 import sys
 
 from media_ai.cli import (
+    batch_video,
     concat_video,
     image2image,
     image2video,
@@ -25,6 +26,7 @@ _COMMANDS = {
     "text2video": text2video.main,
     "image2video": image2video.main,
     "ref2video": ref2video.main,
+    "batch_video": batch_video.main,
     "concat_video": concat_video.main,
     "video_task": video_task.main,
     "media_usage": media_usage.main,
