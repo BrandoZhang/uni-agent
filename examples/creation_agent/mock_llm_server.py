@@ -25,11 +25,16 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
-def _skill_location(messages: list[dict]) -> str | None:
-    """Pull the video-storyboard SKILL.md path out of the injected manifest."""
+def _skill_location(messages: list[dict], tool: str = "image2video") -> str | None:
+    """Pull a per-tool SKILL.md path out of the injected skills manifest.
+
+    Demonstrates progressive disclosure: the 'model' reads the relevant
+    tool's skill on demand. Defaults to the image2video skill (the
+    consistency tool this scripted brief leans on).
+    """
     for m in messages:
         if m.get("role") == "system":
-            hit = re.search(r"<location>([^<]*video-storyboard[^<]*SKILL\.md)</location>", m.get("content") or "")
+            hit = re.search(rf"<location>([^<]*/{re.escape(tool)}/SKILL\.md)</location>", m.get("content") or "")
             if hit:
                 return hit.group(1)
     return None

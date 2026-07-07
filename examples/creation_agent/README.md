@@ -16,8 +16,15 @@ a scripted mock LLM), and switches to real models by flipping two env vars.
    the Agent Skills standard natively (`uni_agent/skills/`): a `SKILL.md`
    with YAML frontmatter + progressive disclosure (only a manifest goes in
    the system prompt; the body is `cat`-ed on demand). We did **not** need
-   DeepAgents or a Claude Code CLI. The workflow lives in
-   [`skills/video-storyboard/`](../../skills/video-storyboard/).
+   DeepAgents or a Claude Code CLI. There is **one skill per generation
+   tool** ([`skills/text2image`](../../skills/text2image/),
+   [`image2image`](../../skills/image2image/),
+   [`text2video`](../../skills/text2video/),
+   [`image2video`](../../skills/image2video/),
+   [`ref2video`](../../skills/ref2video/),
+   [`concat_video`](../../skills/concat_video/)) documenting *that tool's*
+   usage. The agent reads the relevant skill on demand and composes tools
+   adaptively per the user's request — there is no hard-coded pipeline.
 2. **Full Volcengine image + video capability set**, wrapped in CLIs that
    own the HTTP calls — including *multimodal-reference* video. See the tool
    table below.
@@ -140,9 +147,10 @@ reward = quality_proxy - cost_weight * total_tokens      (clamped to [-1, 1])
 
 so a policy that meets the brief with **fewer / cheaper generations** scores
 higher. `quality_proxy` is a placeholder (did we produce a real film) — swap
-in a VLM-as-judge / aesthetic / preference model for production. The skill
-also tells the agent to minimize cost (short clips, 480p, no redundant
-regens) and to report the total.
+in a VLM-as-judge / aesthetic / preference model for production. The per-tool
+skills also tell the agent to minimize cost (smallest size/resolution,
+shortest duration, no redundant regens) and the system prompt asks it to
+report the total.
 
 ---
 
@@ -168,5 +176,5 @@ examples/creation_agent/
 
 uni_agent/tools/media_gen/   ← the 8 CLIs + mediakit.py (mock + Ark backends)
 uni_agent/reward/media_creation.py  ← cost-aware reward spec
-skills/video-storyboard/     ← SKILL.md + reference.md (the workflow)
+skills/<tool>/SKILL.md       ← one skill per generation tool (usage guidance)
 ```
