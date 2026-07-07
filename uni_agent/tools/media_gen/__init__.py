@@ -93,18 +93,6 @@ class Ref2VideoArgs(BaseModel):
     backend: str | None = Field(default=None, description="mock (default) or volc (real API).")
 
 
-class BatchVideoArgs(BaseModel):
-    jobs: list[dict] = Field(
-        description=(
-            "List of video jobs to generate concurrently. Each job: "
-            '{"tool": "text2video"|"image2video"|"ref2video", "output": "shotN.mp4", '
-            '"prompt": "...", "seconds": 5, "resolution": "480p", ...that tool\'s params}.'
-        )
-    )
-    max_concurrent: int = Field(default=4, description="Max in-flight generations (keep modest to avoid rate limits).")
-    backend: str | None = Field(default=None, description="mock (default) or volc (real API).")
-
-
 class ConcatVideoArgs(BaseModel):
     inputs: list[str] = Field(description="Ordered list of clip paths to join into the final film.")
     output: str = Field(description="Path to write the final .mp4.")
@@ -189,13 +177,6 @@ class Ref2VideoTool(_MediaTool):
     _args = Ref2VideoArgs
 
 
-@register_tool("batch_video")
-class BatchVideoTool(_MediaTool):
-    _name = "batch_video"
-    _description = "Generate many video shots concurrently (bounded concurrency + retry on rate limits), then join. Prefer this over calling the video tools one by one for a multi-shot sequence — it turns N sequential multi-minute waits into ~one."
-    _args = BatchVideoArgs
-
-
 @register_tool("concat_video")
 class ConcatVideoTool(_MediaTool):
     _name = "concat_video"
@@ -223,7 +204,6 @@ __all__ = [
     "Text2VideoTool",
     "Image2VideoTool",
     "Ref2VideoTool",
-    "BatchVideoTool",
     "ConcatVideoTool",
     "VideoTaskTool",
     "MediaUsageTool",

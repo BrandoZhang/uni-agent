@@ -10,7 +10,6 @@ from .registry import get_tool, AbstractTool
 from .execute_bash import ExecuteBashTool
 from .lark_cli import LarkCliTool
 from .media_gen import (
-    BatchVideoTool,
     ConcatVideoTool,
     Image2ImageTool,
     Image2VideoTool,
@@ -44,7 +43,6 @@ __all__ = [
     "Text2VideoTool",
     "Image2VideoTool",
     "Ref2VideoTool",
-    "BatchVideoTool",
     "ConcatVideoTool",
     "VideoTaskTool",
     "MediaUsageTool",

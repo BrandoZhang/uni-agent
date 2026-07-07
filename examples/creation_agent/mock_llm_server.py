@@ -25,12 +25,12 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
-def _skill_location(messages: list[dict], tool: str = "batch_video") -> str | None:
+def _skill_location(messages: list[dict], tool: str = "image2video") -> str | None:
     """Pull a per-tool SKILL.md path out of the injected skills manifest.
 
     Demonstrates progressive disclosure: the 'model' reads the relevant
-    tool's skill on demand. Defaults to the batch_video skill (the fan-out/
-    join orchestration this scripted brief leans on).
+    tool's skill on demand. Defaults to the image2video skill (the
+    consistency tool this scripted brief leans on).
     """
     for m in messages:
         if m.get("role") == "system":
@@ -40,8 +40,9 @@ def _skill_location(messages: list[dict], tool: str = "batch_video") -> str | No
     return None
 
 
-def build_script(workspace: str, skill_location: str | None) -> list[dict]:
-    """The ordered list of (name, arguments) tool calls the 'model' will emit."""
+def build_script(workspace: str, skill_location: str | None) -> list[list[dict]]:
+    """Ordered assistant turns; each turn is a LIST of tool calls the 'model'
+    emits together (one turn can request several tools at once)."""
     ws = workspace.rstrip("/")
     read_skill = (
         {"name": "execute_bash", "arguments": {"command": f"cat {skill_location}"}}
@@ -49,55 +50,60 @@ def build_script(workspace: str, skill_location: str | None) -> list[dict]:
         else {"name": "execute_bash", "arguments": {"command": f"ls -la {ws}"}}
     )
     return [
-        read_skill,
-        {
-            "name": "text2image",
-            "arguments": {
-                "prompt": "A lone silver-suited astronaut on a red alien dune, cinematic teal-and-orange grade",
-                "output": f"{ws}/ref_hero.png",
-                "seed": 7,
+        [read_skill],
+        [
+            {
+                "name": "text2image",
+                "arguments": {
+                    "prompt": "A lone silver-suited astronaut on a red alien dune, cinematic teal-and-orange grade",
+                    "output": f"{ws}/ref_hero.png",
+                    "seed": 7,
+                },
+            }
+        ],
+        [
+            # Both shots requested in ONE turn (two tool calls). The harness runs
+            # each and returns both results — no bespoke batch tool needed.
+            {
+                "name": "image2video",
+                "arguments": {
+                    "first_frame": f"{ws}/ref_hero.png",
+                    "prompt": "the astronaut slowly turns toward camera, gentle push-in",
+                    "output": f"{ws}/shot1.mp4",
+                    "seconds": 3,
+                    "resolution": "480p",
+                },
             },
-        },
-        {
-            # Fan out both shots concurrently (bounded) instead of one-by-one.
-            "name": "batch_video",
-            "arguments": {
-                "max_concurrent": 2,
-                "jobs": [
-                    {
-                        "tool": "image2video",
-                        "first_frame": f"{ws}/ref_hero.png",
-                        "prompt": "the astronaut slowly turns toward camera, gentle push-in",
-                        "output": f"{ws}/shot1.mp4",
-                        "seconds": 3,
-                        "resolution": "480p",
-                    },
-                    {
-                        "tool": "text2video",
-                        "prompt": "wide establishing shot of twin suns setting over the alien desert at dusk",
-                        "output": f"{ws}/shot2.mp4",
-                        "seconds": 3,
-                        "resolution": "480p",
-                    },
-                ],
+            {
+                "name": "text2video",
+                "arguments": {
+                    "prompt": "wide establishing shot of twin suns setting over the alien desert at dusk",
+                    "output": f"{ws}/shot2.mp4",
+                    "seconds": 3,
+                    "resolution": "480p",
+                },
             },
-        },
-        {
-            "name": "concat_video",
-            "arguments": {"inputs": [f"{ws}/shot1.mp4", f"{ws}/shot2.mp4"], "output": f"{ws}/final.mp4"},
-        },
-        {"name": "media_usage", "arguments": {}},
-        {
-            "name": "finish",
-            "arguments": {
-                "answer": (
-                    "Done. Storyboard: (1) image2video of the hero astronaut from a locked "
-                    f"reference frame, (2) text2video establishing shot. Final film: {ws}/final.mp4. "
-                    "Cross-shot consistency came from ref_hero.png used as shot 1's first frame. "
-                    "See the media_usage output above for the total token cost."
-                )
-            },
-        },
+        ],
+        [
+            {
+                "name": "concat_video",
+                "arguments": {"inputs": [f"{ws}/shot1.mp4", f"{ws}/shot2.mp4"], "output": f"{ws}/final.mp4"},
+            }
+        ],
+        [{"name": "media_usage", "arguments": {}}],
+        [
+            {
+                "name": "finish",
+                "arguments": {
+                    "answer": (
+                        "Done. Storyboard: (1) image2video of the hero astronaut from a locked "
+                        f"reference frame, (2) text2video establishing shot. Final film: {ws}/final.mp4. "
+                        "Cross-shot consistency came from ref_hero.png used as shot 1's first frame. "
+                        "See the media_usage output above for the total token cost."
+                    )
+                },
+            }
+        ],
     ]
 
 
@@ -134,15 +140,18 @@ class _Handler(BaseHTTPRequestHandler):
         script = build_script(self.workspace, _skill_location(messages))
         step = script[n_assistant] if n_assistant < len(script) else script[-1]
 
-        tool_call = {
-            "id": f"call_{n_assistant}",
-            "type": "function",
-            "function": {"name": step["name"], "arguments": json.dumps(step["arguments"], ensure_ascii=False)},
-        }
+        tool_calls = [
+            {
+                "id": f"call_{n_assistant}_{i}",
+                "type": "function",
+                "function": {"name": call["name"], "arguments": json.dumps(call["arguments"], ensure_ascii=False)},
+            }
+            for i, call in enumerate(step)
+        ]
         message = {
             "role": "assistant",
-            "content": f"[director step {n_assistant}] calling {step['name']}",
-            "tool_calls": [tool_call],
+            "content": f"[director step {n_assistant}] calling {', '.join(c['name'] for c in step)}",
+            "tool_calls": tool_calls,
         }
         # Synthesize a realistic usage breakdown so the fine-grained LLM cost
         # metrics (input / output / cached) are visible end-to-end. Rough

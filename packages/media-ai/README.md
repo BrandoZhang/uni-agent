@@ -24,7 +24,6 @@ Pulls in Pillow (mock image rendering) and a bundled ffmpeg via
 | `text2video`   | text → clip |
 | `image2video`  | first (+ optional last) frame + text → clip |
 | `ref2video`    | multimodal reference (images/videos/audio) + text → clip |
-| `batch_video`  | fan out many shots concurrently (bounded + 429 retry), then join |
 | `concat_video` | join clips → final film (local ffmpeg) |
 | `video_task`   | query / cancel an async video task |
 | `media_usage`  | report accumulated token cost from the ledger |

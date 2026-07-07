@@ -10,20 +10,20 @@ policy that meets the brief with fewer / cheaper generations scores higher.
   did it use at least a couple of shots. This is a *placeholder* for a real
   quality signal (VLM-as-judge / aesthetic / preference model) -- swap it in
   for a production reward.
-- ``total_tokens``: **derived from the trajectory** -- each generation tool
-  prints a JSON result with a ``usage`` block, so the cost is summed from the
-  run's own tool observations. This is concurrency-safe (unlike a shared
-  ledger file, which collides across parallel rollouts) and mirrors how
-  ``search`` reward extracts its answer from the trajectory. The usage ledger
-  is used only as a fallback when the trajectory has no usage.
+- ``total_tokens``: **derived purely from this run's trajectory** -- any tool
+  observation that carries a ``usage`` block contributes its ``total_tokens``
+  (no hardcoded tool allowlist), summed from the run's own tool results. This
+  is concurrency-safe (a shared usage-ledger file would collide across
+  parallel rollouts, so it is deliberately NOT consulted) and mirrors how the
+  ``search`` reward extracts its answer from the trajectory.
 
-The final film is likewise **discovered from the trajectory** (the last
-``concat_video`` output), so the reward doesn't depend on the agent naming
-the file a fixed way.
+The final film is likewise **discovered from the trajectory** -- the last
+``concat_video`` output, or the last produced video clip when there is no
+concat (a valid one-shot deliverable) -- so the reward doesn't depend on the
+agent naming the file a fixed way.
 
 Config keys (all optional; env vars fill the gaps):
-    workspace    -> fallback dir for final.mp4 / usage.jsonl (or $MEDIA_WORKSPACE)
-    usage_log    -> fallback ledger path (or $MEDIA_USAGE_LOG)
+    workspace    -> fallback dir for final.mp4 (or $MEDIA_WORKSPACE)
     final_film   -> fallback film path (or <workspace>/final.mp4)
     cost_weight  -> penalty per token (default 1e-4)
 
@@ -39,14 +39,10 @@ import os
 import shlex
 from pathlib import Path
 
-from media_ai import mediakit
-
 from uni_agent.async_logging import get_logger
 from uni_agent.reward.base import AbstractRewardSpec
 from uni_agent.reward.registry import register_reward_spec
 from uni_agent.utils import auto_await
-
-_GENERATION_TOOLS = {"text2image", "image2image", "text2video", "image2video", "ref2video"}
 
 
 def _parse_tool_json(observation: str) -> dict | None:
@@ -68,9 +64,18 @@ def _parse_tool_json(observation: str) -> dict | None:
 
 
 def _cost_and_film_from_trajectory(trajectory: list) -> tuple[dict, str | None]:
-    """Sum generation cost and find the final film from the run's own tool results."""
+    """Sum generation cost and find the final film from the run's own tool results.
+
+    Cost is derived generically: **any** tool observation that carries a
+    ``usage`` block contributes its ``total_tokens`` — no hardcoded tool
+    allowlist — so new/renamed generation tools (or an async ``video_task``
+    that finalizes a clip) are counted without special-casing. The film is the
+    last ``concat_video`` output, falling back to the last produced video clip
+    (a valid one-shot deliverable needs no concat).
+    """
     totals = {"calls": 0, "images_generated": 0, "video_seconds": 0, "total_tokens": 0, "by_tool": {}}
     final_film: str | None = None
+    last_video: str | None = None
     for step in trajectory:
         for tr in getattr(step, "tool_results", []) or []:
             name = getattr(tr, "name", "")
@@ -79,19 +84,21 @@ def _cost_and_film_from_trajectory(trajectory: list) -> tuple[dict, str | None]:
             payload = _parse_tool_json(getattr(tr, "observation", "") or "")
             if payload is None:
                 continue
+            kind = payload.get("kind")
             if name == "concat_video" and payload.get("path"):
-                final_film = payload["path"]  # last one wins
-            if name in _GENERATION_TOOLS:
-                usage = payload.get("usage") or {}
-                tok = int(usage.get("total_tokens", 0) or 0)
+                final_film = payload["path"]  # last concat wins
+            elif kind == "video" and payload.get("path"):
+                last_video = payload["path"]
+            usage = payload.get("usage") or {}
+            tok = int(usage.get("total_tokens", 0) or 0)
+            if tok or usage.get("generated_images"):
                 totals["calls"] += 1
                 totals["total_tokens"] += tok
                 totals["by_tool"][name] = totals["by_tool"].get(name, 0) + tok
                 totals["images_generated"] += int(usage.get("generated_images", 0) or 0)
-                meta = payload.get("meta") or {}
-                if payload.get("kind") == "video":
-                    totals["video_seconds"] += int(meta.get("seconds", 0) or 0)
-    return totals, final_film
+                if kind == "video":
+                    totals["video_seconds"] += int((payload.get("meta") or {}).get("seconds", 0) or 0)
+    return totals, (final_film or last_video)
 
 
 @register_reward_spec("media_creation")
@@ -101,7 +108,6 @@ class MediaCreationRewardSpec(AbstractRewardSpec):
         *,
         run_id: str,
         workspace: str | None = None,
-        usage_log: str | None = None,
         final_film: str | None = None,
         cost_weight: float = 1e-4,
         env=None,
@@ -109,9 +115,6 @@ class MediaCreationRewardSpec(AbstractRewardSpec):
     ):
         self.run_id = run_id
         self.workspace = Path(workspace or os.getenv("MEDIA_WORKSPACE", ".")).expanduser()
-        self.usage_log = Path(
-            usage_log or os.getenv("MEDIA_USAGE_LOG", str(self.workspace / "usage.jsonl"))
-        ).expanduser()
         self.final_film = Path(final_film or (self.workspace / "final.mp4")).expanduser()
         self.cost_weight = float(cost_weight)
         self.env = env
@@ -121,12 +124,16 @@ class MediaCreationRewardSpec(AbstractRewardSpec):
         """Check an artifact through the ``AgentEnv`` abstraction, which is
         uniform across a container sandbox and the local filesystem
         (``local_native``/``host``). Falls back to a host-side check when no
-        env is available (e.g. standalone reward tests)."""
+        env is available (e.g. standalone reward tests).
+
+        Uses ``wc -c`` (POSIX, portable across GNU/BusyBox/macOS) rather than
+        the GNU-only ``stat -c %s``.
+        """
         if self.env is not None:
             try:
                 q = shlex.quote(path)
                 out = await self.env.communicate(
-                    f"if [ -s {q} ]; then stat -c %s {q}; else echo MISSING; fi", check="ignore"
+                    f"if [ -s {q} ]; then wc -c < {q}; else echo MISSING; fi", check="ignore"
                 )
                 for line in reversed((out or "").splitlines()):
                     line = line.strip()
@@ -148,13 +155,13 @@ class MediaCreationRewardSpec(AbstractRewardSpec):
 
     @auto_await
     async def compute_reward(self, interaction_result: dict, **kwargs) -> tuple[float, dict]:
-        # Prefer the run's own trajectory (concurrency-safe); fall back to the ledger.
+        # Cost is derived purely from THIS run's trajectory (concurrency-safe).
+        # We deliberately do NOT fall back to the usage ledger: under parallel
+        # rollouts the ledger is a shared file, so reading it would contaminate
+        # one rollout's cost with others'. If the trajectory carries no usage,
+        # the correct answer is 0 (no accountable generation), not the ledger.
         trajectory = interaction_result.get("trajectory", []) or []
         totals, film_from_traj = _cost_and_film_from_trajectory(trajectory)
-        source = "trajectory"
-        if totals["total_tokens"] == 0:
-            totals = mediakit.summarize_usage(self.usage_log)
-            source = "ledger"
 
         film = Path(film_from_traj).expanduser() if film_from_traj else self.final_film
         film_exists, film_size = await self._film_exists_and_size(str(film))
@@ -172,11 +179,10 @@ class MediaCreationRewardSpec(AbstractRewardSpec):
             "final_film": str(film),
             "final_film_exists": film_exists,
             "final_film_bytes": film_size,
-            "cost_source": source,
             "usage_totals": totals,
         }
         self.logger.info(
-            f"quality={quality:.2f} tokens={total_tokens} ({source}) "
+            f"quality={quality:.2f} tokens={total_tokens} "
             f"penalty={self.cost_weight * total_tokens:.3f} -> reward={score:.3f}"
         )
         return score, info
