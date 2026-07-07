@@ -33,3 +33,6 @@ The real (volc) backend submits an async task and blocks until ready.
 ## Cost
 Video is expensive and multimodal inputs add tokens; check `usage`. Use the
 lowest resolution / shortest duration that meets the brief.
+
+## Async (long videos)
+Real video generation can take minutes. To avoid blocking, submit with `--wait false` (volc backend): it returns a `task_id` immediately. Then poll with `video_task --op query --id <task_id> --output <path>`, which downloads the clip once the task succeeds. Cancel a queued task with `video_task --op cancel --id <task_id>` to save cost. (The mock backend is synchronous and ignores `--wait`.)

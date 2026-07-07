@@ -41,3 +41,6 @@ returned last frame).
 Video is expensive; `completion_tokens` scales with resolution × duration.
 Cost is an evaluation metric — minimize resolution/duration and avoid
 redundant regenerations. Check `usage`.
+
+## Async (long videos)
+Real video generation can take minutes. To avoid blocking, submit with `--wait false` (volc backend): it returns a `task_id` immediately. Then poll with `video_task --op query --id <task_id> --output <path>`, which downloads the clip once the task succeeds. Cancel a queued task with `video_task --op cancel --id <task_id>` to save cost. (The mock backend is synchronous and ignores `--wait`.)

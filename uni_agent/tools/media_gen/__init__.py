@@ -57,6 +57,7 @@ class Text2VideoArgs(BaseModel):
     camera_fixed: bool = Field(default=False, description="Fix the camera.")
     watermark: bool = Field(default=False, description="Add an AI watermark.")
     generate_audio: bool | None = Field(default=None, description="Generate synced audio (Seedance 2.0/1.5).")
+    wait: bool = Field(default=True, description="Wait for the clip. Set false (volc) to submit and return a task_id to poll with video_task, so you don't block.")
     backend: str | None = Field(default=None, description="mock (default) or volc (real API).")
 
 
@@ -73,6 +74,7 @@ class Image2VideoArgs(BaseModel):
     watermark: bool = Field(default=False, description="Add an AI watermark.")
     generate_audio: bool | None = Field(default=None, description="Generate synced audio.")
     return_last_frame: bool = Field(default=False, description="Also return the clip's last frame (to chain the next shot).")
+    wait: bool = Field(default=True, description="Wait for the clip. Set false (volc) to submit and return a task_id to poll with video_task, so you don't block.")
     backend: str | None = Field(default=None, description="mock (default) or volc (real API).")
 
 
@@ -101,6 +103,7 @@ class ConcatVideoArgs(BaseModel):
 class VideoTaskArgs(BaseModel):
     op: str = Field(description="query | cancel.")
     id: str = Field(description="The async video task id.")
+    output: str | None = Field(default=None, description="On a successful query, download the finished video (and last frame) to this path.")
     backend: str | None = Field(default=None, description="mock or volc.")
 
 

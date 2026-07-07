@@ -27,14 +27,16 @@ Config keys (all optional; env vars fill the gaps):
     final_film   -> fallback film path (or <workspace>/final.mp4)
     cost_weight  -> penalty per token (default 1e-4)
 
-File existence is checked host-side (matching the ``local_native`` demo); for
-a container runtime, resolve the discovered path via ``env.read_file``.
+File existence/size is probed through the ``AgentEnv`` abstraction (uniform
+across a container sandbox and the local filesystem), falling back to a
+host-side check when no env is available.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shlex
 from pathlib import Path
 
 from media_ai import mediakit
@@ -112,11 +114,34 @@ class MediaCreationRewardSpec(AbstractRewardSpec):
         ).expanduser()
         self.final_film = Path(final_film or (self.workspace / "final.mp4")).expanduser()
         self.cost_weight = float(cost_weight)
+        self.env = env
         self.logger = get_logger("media-creation-reward", run_id=run_id)
 
-    def _quality_proxy(self, film: Path, totals: dict) -> float:
+    async def _film_exists_and_size(self, path: str) -> tuple[bool, int]:
+        """Check an artifact through the ``AgentEnv`` abstraction, which is
+        uniform across a container sandbox and the local filesystem
+        (``local_native``/``host``). Falls back to a host-side check when no
+        env is available (e.g. standalone reward tests)."""
+        if self.env is not None:
+            try:
+                q = shlex.quote(path)
+                out = await self.env.communicate(
+                    f"if [ -s {q} ]; then stat -c %s {q}; else echo MISSING; fi", check="ignore"
+                )
+                for line in reversed((out or "").splitlines()):
+                    line = line.strip()
+                    if line.isdigit():
+                        return True, int(line)
+                    if line == "MISSING":
+                        return False, 0
+            except Exception as exc:  # noqa: BLE001 - fall back to host check
+                self.logger.warning(f"env film probe failed ({exc}); falling back to host check")
+        p = Path(path).expanduser()
+        return (p.is_file() and p.stat().st_size > 0), (p.stat().st_size if p.is_file() else 0)
+
+    def _quality_proxy(self, film_exists: bool, totals: dict) -> float:
         """Placeholder quality signal. Replace with a VLM/aesthetic judge."""
-        if not (film.is_file() and film.stat().st_size > 0):
+        if not film_exists:
             return 0.0
         # a short film should be at least a couple of shots' worth of footage
         return 1.0 if totals.get("video_seconds", 0) >= 4 else 0.6
@@ -132,8 +157,9 @@ class MediaCreationRewardSpec(AbstractRewardSpec):
             source = "ledger"
 
         film = Path(film_from_traj).expanduser() if film_from_traj else self.final_film
+        film_exists, film_size = await self._film_exists_and_size(str(film))
         total_tokens = int(totals.get("total_tokens", 0))
-        quality = self._quality_proxy(film, totals)
+        quality = self._quality_proxy(film_exists, totals)
         raw = quality - self.cost_weight * total_tokens
         score = max(-1.0, min(1.0, raw))
 
@@ -144,7 +170,8 @@ class MediaCreationRewardSpec(AbstractRewardSpec):
             "cost_weight": self.cost_weight,
             "cost_penalty": self.cost_weight * total_tokens,
             "final_film": str(film),
-            "final_film_exists": film.is_file(),
+            "final_film_exists": film_exists,
+            "final_film_bytes": film_size,
             "cost_source": source,
             "usage_totals": totals,
         }

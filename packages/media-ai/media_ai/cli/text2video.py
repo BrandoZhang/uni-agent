@@ -10,9 +10,14 @@ Parameters:
   --camera_fixed (bool, optional): fix the camera. Default false.
   --watermark (bool, optional): add watermark. Default false.
   --generate_audio (bool, optional): synth audio (Seedance 2.0/1.5). Default unset.
+  --wait     (bool, optional): wait for the video (default true). With the
+      volc backend, --wait false submits the task and returns a task_id
+      immediately (poll it with video_task) so the agent can yield instead
+      of blocking for minutes. mock ignores it (always synchronous).
   --backend  (string, optional): mock (default) or volc (real API).
 
-The real (volc) backend submits an async task and blocks until ready.
+The real (volc) backend submits an async task; by default it blocks until
+ready. Pass --wait false to submit-and-return.
 """
 
 import argparse
@@ -37,6 +42,7 @@ def main() -> int:
     ap.add_argument("--camera_fixed", type=_bool, default=False)
     ap.add_argument("--watermark", type=_bool, default=False)
     ap.add_argument("--generate_audio", type=_bool, default=None)
+    ap.add_argument("--wait", type=_bool, default=True)
     ap.add_argument("--backend", default=None)
     args = ap.parse_args()
     try:
@@ -50,11 +56,12 @@ def main() -> int:
             camera_fixed=args.camera_fixed,
             watermark=args.watermark,
             generate_audio=args.generate_audio,
+            wait=args.wait,
         )
     except mediakit.MediaError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
-    print(res.to_json())
+    print(mediakit.dumps_result(res))
     return 0
 
 

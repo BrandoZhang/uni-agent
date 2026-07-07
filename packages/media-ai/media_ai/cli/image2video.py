@@ -46,6 +46,7 @@ def main() -> int:
     ap.add_argument("--watermark", type=_bool, default=False)
     ap.add_argument("--generate_audio", type=_bool, default=None)
     ap.add_argument("--return_last_frame", type=_bool, default=False)
+    ap.add_argument("--wait", type=_bool, default=True)
     ap.add_argument("--backend", default=None)
     args = ap.parse_args()
     try:
@@ -62,11 +63,12 @@ def main() -> int:
             watermark=args.watermark,
             generate_audio=args.generate_audio,
             return_last_frame=args.return_last_frame,
+            wait=args.wait,
         )
     except mediakit.MediaError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
-    print(res.to_json())
+    print(mediakit.dumps_result(res))
     return 0
 
 

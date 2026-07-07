@@ -59,6 +59,24 @@ MOCK_RENDER_H = 360  # mock clips render small (fast); billed at requested resol
 
 ARK_BASE_URL = os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
 
+# Seedream 4.5/5.0 method-2 requires total pixels in [2560x1440, 4096x4096].
+# Small demo defaults (e.g. 768x432) are below the floor and would be rejected
+# by the real API, so the Volc image path resolves to a valid size.
+_VOLC_MIN_IMAGE_PIXELS = 2560 * 1440
+
+
+def _volc_image_size(width: int, height: int) -> str:
+    """Resolve a valid Ark image ``size``. ``$VOLC_IMAGE_SIZE`` overrides; a
+    below-floor W×H falls back to the ``2K`` named preset (the model then picks
+    dimensions from the prompt)."""
+    override = os.getenv("VOLC_IMAGE_SIZE")
+    if override:
+        return override
+    if width * height >= _VOLC_MIN_IMAGE_PIXELS:
+        return f"{width}x{height}"
+    return "2K"
+
+
 # Video resolution/ratio -> (w, h). Used for cost accounting (tokens ~ pixels).
 _VIDEO_DIMS: dict[str, dict[str, tuple[int, int]]] = {
     "480p": {
@@ -362,12 +380,20 @@ class GenResult:
         )
 
 
+def dumps_result(res) -> str:
+    """Serialize a backend result: a ``GenResult`` (sync) or a plain dict
+    (async submit / ``video_task``)."""
+    return res.to_json() if hasattr(res, "to_json") else json.dumps(res, ensure_ascii=False)
+
+
 class Backend:
     name = "base"
 
     def text2image(self, *, prompt, out, width, height, seed, max_images=1): ...
     def image2image(self, *, prompt, images, out, strength, seed, max_images=1): ...
-    def text2video(self, *, prompt, out, seconds, resolution, ratio, seed, camera_fixed, watermark, generate_audio): ...
+    def text2video(
+        self, *, prompt, out, seconds, resolution, ratio, seed, camera_fixed, watermark, generate_audio, wait=True
+    ): ...
     def image2video(
         self,
         *,
@@ -383,11 +409,25 @@ class Backend:
         watermark,
         generate_audio,
         return_last_frame,
+        wait=True,
     ): ...
     def ref2video(
-        self, *, prompt, images, videos, audios, out, seconds, resolution, ratio, seed, watermark, generate_audio
+        self,
+        *,
+        prompt,
+        images,
+        videos,
+        audios,
+        out,
+        seconds,
+        resolution,
+        ratio,
+        seed,
+        watermark,
+        generate_audio,
+        wait=True,
     ): ...
-    def video_task(self, *, op, task_id) -> dict: ...
+    def video_task(self, *, op, task_id, output=None) -> dict: ...
 
 
 # --------------------------------------------------------------------------
@@ -503,7 +543,10 @@ class MockBackend(Backend):
             extra_paths=extra,
         )
 
-    def text2video(self, *, prompt, out, seconds, resolution, ratio, seed, camera_fixed, watermark, generate_audio):
+    def text2video(
+        self, *, prompt, out, seconds, resolution, ratio, seed, camera_fixed, watermark, generate_audio, wait=True
+    ):
+        # mock generation is synchronous; `wait` is accepted for API parity.
         return self._video("mock text2video", prompt, out, seconds, resolution, ratio, seed)
 
     def image2video(
@@ -521,6 +564,7 @@ class MockBackend(Backend):
         watermark,
         generate_audio,
         return_last_frame,
+        wait=True,
     ):
         ff = Path(first_frame)
         if not ff.is_file():
@@ -539,14 +583,27 @@ class MockBackend(Backend):
         )
 
     def ref2video(
-        self, *, prompt, images, videos, audios, out, seconds, resolution, ratio, seed, watermark, generate_audio
+        self,
+        *,
+        prompt,
+        images,
+        videos,
+        audios,
+        out,
+        seconds,
+        resolution,
+        ratio,
+        seed,
+        watermark,
+        generate_audio,
+        wait=True,
     ):
         images = [Path(p) for p in (images or [])]
         base = images[0] if images and images[0].is_file() else None
         tag = f"  [refs img:{len(images)} vid:{len(videos or [])} aud:{len(audios or [])}]"
         return self._video("mock ref2video", prompt + tag, out, seconds, resolution, ratio, seed, base=base)
 
-    def video_task(self, *, op, task_id) -> dict:
+    def video_task(self, *, op, task_id, output=None) -> dict:
         return {
             "ok": True,
             "backend": self.name,
@@ -690,7 +747,12 @@ class VolcBackend(Backend):
 
     def text2image(self, *, prompt, out, width, height, seed, max_images=1):
         return self._images_generation(
-            prompt=prompt, images=None, out=out, size=f"{width}x{height}", max_images=max_images, tool="text2image"
+            prompt=prompt,
+            images=None,
+            out=out,
+            size=_volc_image_size(width, height),
+            max_images=max_images,
+            tool="text2image",
         )
 
     def image2image(self, *, prompt, images, out, strength, seed, max_images=1):
@@ -698,7 +760,7 @@ class VolcBackend(Backend):
             prompt=prompt,
             images=[Path(p) for p in (images or [])],
             out=out,
-            size="2K",
+            size=os.getenv("VOLC_IMAGE_SIZE", "2K"),
             max_images=max_images,
             tool="image2image",
         )
@@ -738,6 +800,65 @@ class VolcBackend(Backend):
             raise MediaError(f"Ark video create returned no task id: {json.dumps(data)[:400]}")
         return task_id
 
+    def _finalize_video(
+        self, res: dict, out: Path, *, task_id: str, tool: str, seconds: int, resolution: str
+    ) -> GenResult:
+        """Download a succeeded task's video (+ last frame) and record its usage."""
+        out = Path(out)
+        content = res.get("content") or {}
+        if not content.get("video_url"):
+            raise MediaError(f"Ark task {task_id} succeeded but no video_url: {json.dumps(res)[:400]}")
+        self._download(content["video_url"], out)
+        extra = []
+        if content.get("last_frame_url"):
+            lf = out.with_name(f"{out.stem}_lastframe.png")
+            self._download(content["last_frame_url"], lf)
+            extra.append(str(lf))
+        usage = res.get("usage") or {}
+        record_usage(
+            {
+                "tool": tool,
+                "backend": self.name,
+                "model": self.video_model,
+                "kind": "video",
+                "seconds": res.get("duration", seconds),
+                "resolution": res.get("resolution", resolution),
+                "completion_tokens": usage.get("completion_tokens", 0),
+                "total_tokens": usage.get("total_tokens", 0),
+            }
+        )
+        return GenResult(
+            out,
+            self.name,
+            "video",
+            usage=usage,
+            meta={
+                "task_id": task_id,
+                "model": self.video_model,
+                "resolution": res.get("resolution", resolution),
+                "ratio": res.get("ratio"),
+            },
+            extra_paths=extra,
+        )
+
+    def _submitted(self, task_id: str, out: Path, *, tool: str) -> dict:
+        """Async-submit result: return the task id without waiting.
+
+        Poll with ``video_task --op query --id <task_id> --output <out>``; when
+        it succeeds the video is downloaded to ``out``. This lets the agent
+        yield its concurrency slot instead of blocking for minutes.
+        """
+        return {
+            "ok": True,
+            "kind": "video",
+            "backend": self.name,
+            "status": "queued",
+            "task_id": task_id,
+            "tool": tool,
+            "output": str(out),
+            "note": "submitted; poll with `video_task --op query --id <task_id> --output <output>`.",
+        }
+
     def _poll_video(self, task_id: str, out: Path, *, tool: str, seconds: int, resolution: str) -> GenResult:
         out = Path(out)
         deadline = time.monotonic() + self.poll_timeout
@@ -745,40 +866,8 @@ class VolcBackend(Backend):
             res = self._request("GET", f"/contents/generations/tasks/{task_id}")
             status = str(res.get("status", "")).lower()
             if status == "succeeded":
-                content = res.get("content") or {}
-                if not content.get("video_url"):
-                    raise MediaError(f"Ark task {task_id} succeeded but no video_url: {json.dumps(res)[:400]}")
-                self._download(content["video_url"], out)
-                extra = []
-                if content.get("last_frame_url"):
-                    lf = out.with_name(f"{out.stem}_lastframe.png")
-                    self._download(content["last_frame_url"], lf)
-                    extra.append(str(lf))
-                usage = res.get("usage") or {}
-                record_usage(
-                    {
-                        "tool": tool,
-                        "backend": self.name,
-                        "model": self.video_model,
-                        "kind": "video",
-                        "seconds": res.get("duration", seconds),
-                        "resolution": res.get("resolution", resolution),
-                        "completion_tokens": usage.get("completion_tokens", 0),
-                        "total_tokens": usage.get("total_tokens", 0),
-                    }
-                )
-                return GenResult(
-                    out,
-                    self.name,
-                    "video",
-                    usage=usage,
-                    meta={
-                        "task_id": task_id,
-                        "model": self.video_model,
-                        "resolution": res.get("resolution", resolution),
-                        "ratio": res.get("ratio"),
-                    },
-                    extra_paths=extra,
+                return self._finalize_video(
+                    res, out, task_id=task_id, tool=tool, seconds=seconds, resolution=resolution
                 )
             if status in ("failed", "cancelled", "expired"):
                 raise MediaError(f"Ark video task {task_id} {status}: {json.dumps(res.get('error') or res)[:400]}")
@@ -787,7 +876,9 @@ class VolcBackend(Backend):
             f"Ark video task {task_id} timed out after {self.poll_timeout}s (id={task_id}; cancel with video_task)"
         )
 
-    def text2video(self, *, prompt, out, seconds, resolution, ratio, seed, camera_fixed, watermark, generate_audio):
+    def text2video(
+        self, *, prompt, out, seconds, resolution, ratio, seed, camera_fixed, watermark, generate_audio, wait=True
+    ):
         content = [{"type": "text", "text": prompt}]
         tid = self._create_video_task(
             content=content,
@@ -799,6 +890,8 @@ class VolcBackend(Backend):
             watermark=watermark,
             generate_audio=generate_audio,
         )
+        if not wait:
+            return self._submitted(tid, Path(out), tool="text2video")
         return self._poll_video(tid, out, tool="text2video", seconds=seconds, resolution=resolution)
 
     def image2video(
@@ -816,6 +909,7 @@ class VolcBackend(Backend):
         watermark,
         generate_audio,
         return_last_frame,
+        wait=True,
     ):
         content: list[dict] = [
             {
@@ -845,10 +939,25 @@ class VolcBackend(Backend):
             generate_audio=generate_audio,
             return_last_frame=return_last_frame,
         )
+        if not wait:
+            return self._submitted(tid, Path(out), tool="image2video")
         return self._poll_video(tid, out, tool="image2video", seconds=seconds, resolution=resolution)
 
     def ref2video(
-        self, *, prompt, images, videos, audios, out, seconds, resolution, ratio, seed, watermark, generate_audio
+        self,
+        *,
+        prompt,
+        images,
+        videos,
+        audios,
+        out,
+        seconds,
+        resolution,
+        ratio,
+        seed,
+        watermark,
+        generate_audio,
+        wait=True,
     ):
         content: list[dict] = []
         for p in images or []:
@@ -888,16 +997,29 @@ class VolcBackend(Backend):
             watermark=watermark,
             generate_audio=generate_audio,
         )
+        if not wait:
+            return self._submitted(tid, Path(out), tool="ref2video")
         return self._poll_video(tid, out, tool="ref2video", seconds=seconds, resolution=resolution)
 
-    def video_task(self, *, op, task_id) -> dict:
+    def video_task(self, *, op, task_id, output=None) -> dict:
         if op == "query":
-            return {
-                "ok": True,
-                "backend": self.name,
-                "op": op,
-                **self._request("GET", f"/contents/generations/tasks/{task_id}"),
-            }
+            res = self._request("GET", f"/contents/generations/tasks/{task_id}")
+            status = str(res.get("status", "")).lower()
+            out = {"ok": True, "backend": self.name, "op": op, **res}
+            # If the caller supplied an output path and the task is done,
+            # download the artifact here so an async submit can be finalized.
+            if output and status == "succeeded":
+                gen = self._finalize_video(
+                    res,
+                    Path(output),
+                    task_id=task_id,
+                    tool="video_task",
+                    seconds=res.get("duration", 0),
+                    resolution=res.get("resolution", ""),
+                )
+                out["path"] = str(gen.path)
+                out["extra_paths"] = gen.extra_paths
+            return out
         if op == "cancel":
             self._request("DELETE", f"/contents/generations/tasks/{task_id}")
             return {"ok": True, "backend": self.name, "op": op, "task_id": task_id, "note": "cancel/delete requested"}
