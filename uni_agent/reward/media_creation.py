@@ -37,10 +37,11 @@ import json
 import os
 from pathlib import Path
 
+from media_ai import mediakit
+
 from uni_agent.async_logging import get_logger
 from uni_agent.reward.base import AbstractRewardSpec
 from uni_agent.reward.registry import register_reward_spec
-from uni_agent.tools.media_gen import mediakit
 from uni_agent.utils import auto_await
 
 _GENERATION_TOOLS = {"text2image", "image2image", "text2video", "image2video", "ref2video"}

@@ -37,11 +37,14 @@ a scripted mock LLM), and switches to real models by flipping two env vars.
 
 ## Tool suite → Volcengine (Ark) capabilities
 
-Each tool is a self-contained CLI in
-[`uni_agent/tools/media_gen/cli/`](../../uni_agent/tools/media_gen/cli/); the
-HTTP calls + mock rendering live in `mediakit.py`. The default backend is an
-offline **mock** (Pillow images + ffmpeg clips); `--backend volc` calls the
-real Ark API (Bearer API-Key auth).
+Each tool is a command from the standalone **[`media-ai`](../../packages/media-ai/)**
+package (`pip install -e packages/media-ai`) — a self-contained CLI toolkit
+with **no uni-agent dependency**, so the same tools drop into any agent
+framework's sandbox. uni-agent registers them as *system tools* (thin
+schema wrappers in [`uni_agent/tools/media_gen/`](../../uni_agent/tools/media_gen/));
+the implementation + HTTP calls live in the package's `mediakit.py`. The
+default backend is an offline **mock** (Pillow images + ffmpeg clips);
+`--backend volc` calls the real Ark API (Bearer API-Key auth).
 
 | Tool | Capability | Ark endpoint |
 |---|---|---|
@@ -64,8 +67,8 @@ a queued task (a cost lever).
 
 ### 1. No-LLM smoke test (verify the toolchain now)
 
-Needs only Pillow + ffmpeg (`pip install pillow imageio-ffmpeg`). No model,
-no credentials, no uni-agent loop:
+Needs only the media-ai package (`pip install -e packages/media-ai`, which
+pulls in Pillow + ffmpeg). No model, no credentials, no uni-agent loop:
 
 ```bash
 python examples/creation_agent/smoke_test.py
@@ -81,7 +84,8 @@ OpenAI-compatible server (see the vLLM note below), the `local_native`
 runtime, the real tools, and the mock media backend:
 
 ```bash
-pip install swe-rex openai loguru pydantic pydantic_settings orjson regex pillow imageio-ffmpeg
+pip install swe-rex openai loguru pydantic pydantic_settings orjson regex
+pip install -e packages/media-ai          # the media tools (Pillow + ffmpeg pulled in)
 python examples/creation_agent/demo.py
 ```
 
@@ -174,7 +178,8 @@ examples/creation_agent/
 ├── smoke_test.py        ← no-LLM toolchain test
 └── config.yaml          ← UniAgentLoop (large-scale / training) config
 
-uni_agent/tools/media_gen/   ← the 8 CLIs + mediakit.py (mock + Ark backends)
+packages/media-ai/          ← standalone media CLI toolkit (mock + Ark backends)
+uni_agent/tools/media_gen/   ← thin uni-agent registrations for those commands
 uni_agent/reward/media_creation.py  ← cost-aware reward spec
 skills/<tool>/SKILL.md       ← one skill per generation tool (usage guidance)
 ```

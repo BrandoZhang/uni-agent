@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """media_usage: report accumulated generation cost from the usage ledger.
 
 Every text2image/image2image/text2video/image2video/ref2video call appends
@@ -9,16 +8,12 @@ total token cost for the run.
 Parameters:
   --log (string, optional): ledger path. Defaults to $MEDIA_USAGE_LOG.
 """
+
 import argparse
 import json
 import pathlib
-import sys
 
-try:
-    from uni_agent.tools.media_gen import mediakit
-except ImportError:
-    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-    import mediakit  # type: ignore
+from media_ai import mediakit
 
 
 def main() -> int:

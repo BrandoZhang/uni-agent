@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""No-LLM smoke test: exercise the media-gen CLIs end-to-end offline.
+"""No-LLM smoke test: exercise the media-ai CLIs end-to-end offline.
 
-Runs the storyboard pipeline directly (no model, no uni_agent loop) so the
-toolchain can be verified anywhere Pillow + ffmpeg are available:
+Runs the storyboard pipeline directly (no model, no uni_agent loop) via the
+standalone media-ai package, so the toolchain can be verified anywhere it is
+installed (`pip install -e packages/media-ai`; needs Pillow + ffmpeg):
 
   text2image -> image2image -> image2video -> text2video -> ref2video
              -> concat_video -> media_usage
@@ -23,11 +24,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-CLI = Path(__file__).resolve().parents[2] / "uni_agent" / "tools" / "media_gen" / "cli"
-
 
 def run(name: str, *args: str) -> dict:
-    proc = subprocess.run([sys.executable, str(CLI / name), *args], capture_output=True, text=True)
+    # Invoke through the media-ai dispatcher so no repo paths are assumed.
+    proc = subprocess.run([sys.executable, "-m", "media_ai", name, *args], capture_output=True, text=True)
     if proc.returncode != 0:
         print(f"[FAIL] {name}: {proc.stderr.strip()}", file=sys.stderr)
         sys.exit(1)

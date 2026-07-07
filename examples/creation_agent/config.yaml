@@ -38,6 +38,9 @@
   # parser only matters for text-format models. hermes/qwen3_coder both work.
   tool_parser: qwen3_coder
 
+  # The media tools are `media-ai` console scripts (system tools): the runtime
+  # must have `pip install media-ai` (or `-e packages/media-ai`) so they're on
+  # PATH. execute_bash / str_replace_editor / finish are copied in as usual.
   tools:
     - name: execute_bash
     - name: str_replace_editor

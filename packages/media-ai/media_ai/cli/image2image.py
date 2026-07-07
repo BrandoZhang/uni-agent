@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """image2image: generate image(s) from one or more reference images + a prompt.
 
 Covers single-image and multi-image reference generation (and group output).
@@ -14,16 +13,13 @@ Parameters:
   --seed     (int, optional): seed for reproducibility.
   --backend  (string, optional): mock (default) or volc (real API).
 """
+
 import argparse
 import json
 import pathlib
 import sys
 
-try:
-    from uni_agent.tools.media_gen import mediakit
-except ImportError:
-    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-    import mediakit  # type: ignore
+from media_ai import mediakit
 
 
 def _listify(raw: list[str]) -> list[str]:
@@ -49,8 +45,12 @@ def main() -> int:
     args = ap.parse_args()
     try:
         res = mediakit.get_backend(args.backend).image2image(
-            prompt=args.prompt, images=_listify(args.images), out=pathlib.Path(args.output),
-            strength=args.strength, seed=args.seed, max_images=args.max_images,
+            prompt=args.prompt,
+            images=_listify(args.images),
+            out=pathlib.Path(args.output),
+            strength=args.strength,
+            seed=args.seed,
+            max_images=args.max_images,
         )
     except mediakit.MediaError as e:
         print(f"Error: {e}", file=sys.stderr)

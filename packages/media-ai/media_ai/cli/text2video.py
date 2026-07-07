@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """text2video: generate a short video clip from a text prompt.
 
 Parameters:
@@ -15,15 +14,12 @@ Parameters:
 
 The real (volc) backend submits an async task and blocks until ready.
 """
+
 import argparse
 import pathlib
 import sys
 
-try:
-    from uni_agent.tools.media_gen import mediakit
-except ImportError:
-    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-    import mediakit  # type: ignore
+from media_ai import mediakit
 
 
 def _bool(s):
@@ -45,9 +41,15 @@ def main() -> int:
     args = ap.parse_args()
     try:
         res = mediakit.get_backend(args.backend).text2video(
-            prompt=args.prompt, out=pathlib.Path(args.output), seconds=args.seconds,
-            resolution=args.resolution, ratio=args.ratio, seed=args.seed,
-            camera_fixed=args.camera_fixed, watermark=args.watermark, generate_audio=args.generate_audio,
+            prompt=args.prompt,
+            out=pathlib.Path(args.output),
+            seconds=args.seconds,
+            resolution=args.resolution,
+            ratio=args.ratio,
+            seed=args.seed,
+            camera_fixed=args.camera_fixed,
+            watermark=args.watermark,
+            generate_audio=args.generate_audio,
         )
     except mediakit.MediaError as e:
         print(f"Error: {e}", file=sys.stderr)

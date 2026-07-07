@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """ref2video: multimodal-reference video generation (Seedance 2.0).
 
 Generate one video from any mix of reference images (0-9), reference
@@ -25,16 +24,13 @@ Parameters:
 Note: reference videos/audio should generally be public URLs or asset://
 IDs; large local files are inlined as base64 which the API may reject.
 """
+
 import argparse
 import json
 import pathlib
 import sys
 
-try:
-    from uni_agent.tools.media_gen import mediakit
-except ImportError:
-    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-    import mediakit  # type: ignore
+from media_ai import mediakit
 
 
 def _bool(s):
@@ -71,10 +67,17 @@ def main() -> int:
     args = ap.parse_args()
     try:
         res = mediakit.get_backend(args.backend).ref2video(
-            prompt=args.prompt, images=_listify(args.images), videos=_listify(args.videos),
-            audios=_listify(args.audios), out=pathlib.Path(args.output), seconds=args.seconds,
-            resolution=args.resolution, ratio=args.ratio, seed=args.seed,
-            watermark=args.watermark, generate_audio=args.generate_audio,
+            prompt=args.prompt,
+            images=_listify(args.images),
+            videos=_listify(args.videos),
+            audios=_listify(args.audios),
+            out=pathlib.Path(args.output),
+            seconds=args.seconds,
+            resolution=args.resolution,
+            ratio=args.ratio,
+            seed=args.seed,
+            watermark=args.watermark,
+            generate_audio=args.generate_audio,
         )
     except mediakit.MediaError as e:
         print(f"Error: {e}", file=sys.stderr)

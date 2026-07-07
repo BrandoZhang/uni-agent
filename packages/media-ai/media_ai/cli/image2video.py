@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """image2video: generate a clip from a first frame (+ optional last frame).
 
 The key tool for cross-shot consistency: pass a reference image as the
@@ -21,15 +20,12 @@ Parameters:
       (useful to chain the next shot). Default false.
   --backend  (string, optional): mock (default) or volc (real API).
 """
+
 import argparse
 import pathlib
 import sys
 
-try:
-    from uni_agent.tools.media_gen import mediakit
-except ImportError:
-    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-    import mediakit  # type: ignore
+from media_ai import mediakit
 
 
 def _bool(s):
@@ -54,11 +50,18 @@ def main() -> int:
     args = ap.parse_args()
     try:
         res = mediakit.get_backend(args.backend).image2video(
-            prompt=args.prompt, first_frame=pathlib.Path(args.first_frame),
+            prompt=args.prompt,
+            first_frame=pathlib.Path(args.first_frame),
             last_frame=(pathlib.Path(args.last_frame) if args.last_frame else None),
-            out=pathlib.Path(args.output), seconds=args.seconds, resolution=args.resolution, ratio=args.ratio,
-            seed=args.seed, camera_fixed=args.camera_fixed, watermark=args.watermark,
-            generate_audio=args.generate_audio, return_last_frame=args.return_last_frame,
+            out=pathlib.Path(args.output),
+            seconds=args.seconds,
+            resolution=args.resolution,
+            ratio=args.ratio,
+            seed=args.seed,
+            camera_fixed=args.camera_fixed,
+            watermark=args.watermark,
+            generate_audio=args.generate_audio,
+            return_last_frame=args.return_last_frame,
         )
     except mediakit.MediaError as e:
         print(f"Error: {e}", file=sys.stderr)

@@ -1,34 +1,25 @@
 """Multimodal *creation* tools: text/image/video/audio -> image/video.
 
-CLI tools the agent can call to build a video from a storyboard, plus cost
-accounting. Each tool is a thin registration wrapper around a self-contained
-CLI in ``cli/`` (shared logic in ``mediakit.py``).
+These are thin uni-agent registrations for the standalone **media-ai** CLI
+toolkit (``packages/media-ai``). The actual implementation + HTTP calls live
+in that pip-installable package (``pip install -e packages/media-ai``); here we
+only declare the tool schemas so the model can call the commands.
 
-Generation tools:
-- ``text2image``   — prompt -> image(s) (group images via max_images)
-- ``image2image``  — reference image(s) + prompt -> image(s)
-- ``text2video``   — prompt -> clip
-- ``image2video``  — first (+ optional last) frame + prompt -> clip
-- ``ref2video``    — multimodal reference (images/videos/audio) + prompt -> clip
-- ``concat_video`` — join per-shot clips into the final film
+Because the commands ship as ``media-ai`` console scripts (``text2image``,
+``image2video``, ...), these are registered as **system tools**
+(``copy_to_remote=False``): the runtime is expected to have ``media-ai``
+installed (so the scripts are on PATH), rather than uni-agent copying a script
+in. This keeps the toolkit decoupled and reusable across agent frameworks.
 
-Utility tools:
-- ``video_task``   — query/cancel an async video task (cost control)
-- ``media_usage``  — report accumulated token cost from the usage ledger
-
-Default backend is a fully-offline mock (Pillow + ffmpeg placeholders); set
-``--backend volc`` (or ``MEDIA_BACKEND=volc`` + ``ARK_API_KEY``) to call
-Volcengine's real Ark Visual API.
+Generation tools: text2image, image2image, text2video, image2video, ref2video,
+concat_video. Utility tools: video_task, media_usage. Default backend is an
+offline mock; set ``MEDIA_BACKEND=volc`` + ``ARK_API_KEY`` for the real Ark API.
 """
-
-from pathlib import Path
 
 from pydantic import BaseModel, Field
 
 from uni_agent.tools.base import AbstractTool
 from uni_agent.tools.registry import register_tool
-
-_CLI = Path(__file__).parent / "cli"
 
 
 # --------------------------------------------------------------------------
@@ -123,7 +114,14 @@ class MediaUsageArgs(BaseModel):
 
 
 class _MediaTool(AbstractTool):
-    """Base for the media tools: each maps to a CLI file in ``cli/``."""
+    """Base for the media tools: each maps to a ``media-ai`` console script.
+
+    ``copy_to_remote=False`` -> the runtime must already have ``media-ai`` on
+    PATH (``pip install -e packages/media-ai``); ``install_tools`` only does a
+    ``which <name>`` presence check.
+    """
+
+    copy_to_remote = False
 
     _name: str
     _description: str
@@ -133,14 +131,11 @@ class _MediaTool(AbstractTool):
     def name(self) -> str:
         return self._name
 
-    @property
-    def local_path(self) -> Path:
-        return _CLI / self._name
-
     def get_tool_schema(self) -> dict:
         return self.build_tool_schema(description=self._description, arguments_model=self._args)
 
     def get_install_command(self) -> str | None:
+        # media-ai is provisioned out of band; nothing to install per-tool.
         return None
 
 

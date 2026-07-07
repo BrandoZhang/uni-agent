@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """concat_video: join per-shot clips into one final film.
 
 Clips are normalised (size/fps) and re-encoded so differing inputs join
@@ -13,16 +12,13 @@ Parameters:
   --width  (int, optional): output width. Default 768.
   --height (int, optional): output height. Default 432.
 """
+
 import argparse
 import json
 import pathlib
 import sys
 
-try:
-    from uni_agent.tools.media_gen import mediakit
-except ImportError:
-    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-    import mediakit  # type: ignore
+from media_ai import mediakit
 
 
 def _parse_inputs(raw: list[str]) -> list[str]:
@@ -52,7 +48,11 @@ def main() -> int:
         print(f"Error: {e}", file=sys.stderr)
         return 1
     size = out.stat().st_size if out.is_file() else 0
-    print(json.dumps({"ok": True, "kind": "video", "path": str(out), "clips": len(inputs), "bytes": size}, ensure_ascii=False))
+    print(
+        json.dumps(
+            {"ok": True, "kind": "video", "path": str(out), "clips": len(inputs), "bytes": size}, ensure_ascii=False
+        )
+    )
     return 0
 
 

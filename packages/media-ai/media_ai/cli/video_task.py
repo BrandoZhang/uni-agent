@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """video_task: query or cancel an async video-generation task (volc backend).
 
 The video CLIs block until the task finishes, so you normally don't need
@@ -10,16 +9,12 @@ Parameters:
   --id (string, required): the task id (as returned by the Ark API).
   --backend (string, optional): mock (no async tasks) or volc.
 """
+
 import argparse
 import json
-import pathlib
 import sys
 
-try:
-    from uni_agent.tools.media_gen import mediakit
-except ImportError:
-    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-    import mediakit  # type: ignore
+from media_ai import mediakit
 
 
 def main() -> int:

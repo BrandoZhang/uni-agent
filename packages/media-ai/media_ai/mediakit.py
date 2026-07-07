@@ -61,9 +61,30 @@ ARK_BASE_URL = os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/
 
 # Video resolution/ratio -> (w, h). Used for cost accounting (tokens ~ pixels).
 _VIDEO_DIMS: dict[str, dict[str, tuple[int, int]]] = {
-    "480p": {"16:9": (864, 480), "9:16": (480, 864), "1:1": (640, 640), "4:3": (736, 544), "3:4": (544, 736), "21:9": (960, 416)},
-    "720p": {"16:9": (1280, 720), "9:16": (720, 1280), "1:1": (960, 960), "4:3": (1120, 832), "3:4": (832, 1120), "21:9": (1504, 640)},
-    "1080p": {"16:9": (1920, 1080), "9:16": (1080, 1920), "1:1": (1440, 1440), "4:3": (1664, 1248), "3:4": (1248, 1664), "21:9": (2176, 928)},
+    "480p": {
+        "16:9": (864, 480),
+        "9:16": (480, 864),
+        "1:1": (640, 640),
+        "4:3": (736, 544),
+        "3:4": (544, 736),
+        "21:9": (960, 416),
+    },
+    "720p": {
+        "16:9": (1280, 720),
+        "9:16": (720, 1280),
+        "1:1": (960, 960),
+        "4:3": (1120, 832),
+        "3:4": (832, 1120),
+        "21:9": (1504, 640),
+    },
+    "1080p": {
+        "16:9": (1920, 1080),
+        "9:16": (1080, 1920),
+        "1:1": (1440, 1440),
+        "4:3": (1664, 1248),
+        "3:4": (1248, 1664),
+        "21:9": (2176, 928),
+    },
 }
 
 
@@ -231,15 +252,54 @@ def _image_to_clip(image: Path, out: Path, *, seconds: int, fps: int, w: int, h:
     total = max(1, seconds * fps)
     vf = f"scale={w * 2}:{h * 2},zoompan=z='min(zoom+0.0012,1.12)':d={total}:s={w}x{h}:fps={fps},format=yuv420p"
     try:
-        _run_ffmpeg(["-loop", "1", "-i", str(image), "-t", str(seconds), "-r", str(fps), "-vf", vf,
-                     "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", str(out)])
+        _run_ffmpeg(
+            [
+                "-loop",
+                "1",
+                "-i",
+                str(image),
+                "-t",
+                str(seconds),
+                "-r",
+                str(fps),
+                "-vf",
+                vf,
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-pix_fmt",
+                "yuv420p",
+                str(out),
+            ]
+        )
     except MediaError:
-        _run_ffmpeg(["-loop", "1", "-i", str(image), "-t", str(seconds), "-r", str(fps),
-                     "-vf", f"scale={w}:{h},format=yuv420p", "-c:v", "libx264", "-preset", "veryfast",
-                     "-pix_fmt", "yuv420p", str(out)])
+        _run_ffmpeg(
+            [
+                "-loop",
+                "1",
+                "-i",
+                str(image),
+                "-t",
+                str(seconds),
+                "-r",
+                str(fps),
+                "-vf",
+                f"scale={w}:{h},format=yuv420p",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-pix_fmt",
+                "yuv420p",
+                str(out),
+            ]
+        )
 
 
-def concat_clips(inputs: list[Path], out: Path, *, w: int = DEFAULT_W, h: int = DEFAULT_H, fps: int = DEFAULT_FPS) -> Path:
+def concat_clips(
+    inputs: list[Path], out: Path, *, w: int = DEFAULT_W, h: int = DEFAULT_H, fps: int = DEFAULT_FPS
+) -> Path:
     inputs = [Path(p) for p in inputs]
     for p in inputs:
         if not p.is_file():
@@ -255,7 +315,19 @@ def concat_clips(inputs: list[Path], out: Path, *, w: int = DEFAULT_W, h: int = 
         filters.append(f"[{i}:v]scale={w}:{h},fps={fps},format=yuv420p,setsar=1[v{i}]")
         labels += f"[v{i}]"
     fc = ";".join(filters) + f";{labels}concat=n={len(inputs)}:v=1:a=0[outv]"
-    args += ["-filter_complex", fc, "-map", "[outv]", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", str(out)]
+    args += [
+        "-filter_complex",
+        fc,
+        "-map",
+        "[outv]",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-pix_fmt",
+        "yuv420p",
+        str(out),
+    ]
     _run_ffmpeg(args)
     return out
 
@@ -296,8 +368,25 @@ class Backend:
     def text2image(self, *, prompt, out, width, height, seed, max_images=1): ...
     def image2image(self, *, prompt, images, out, strength, seed, max_images=1): ...
     def text2video(self, *, prompt, out, seconds, resolution, ratio, seed, camera_fixed, watermark, generate_audio): ...
-    def image2video(self, *, prompt, first_frame, last_frame, out, seconds, resolution, ratio, seed, camera_fixed, watermark, generate_audio, return_last_frame): ...
-    def ref2video(self, *, prompt, images, videos, audios, out, seconds, resolution, ratio, seed, watermark, generate_audio): ...
+    def image2video(
+        self,
+        *,
+        prompt,
+        first_frame,
+        last_frame,
+        out,
+        seconds,
+        resolution,
+        ratio,
+        seed,
+        camera_fixed,
+        watermark,
+        generate_audio,
+        return_last_frame,
+    ): ...
+    def ref2video(
+        self, *, prompt, images, videos, audios, out, seconds, resolution, ratio, seed, watermark, generate_audio
+    ): ...
     def video_task(self, *, op, task_id) -> dict: ...
 
 
@@ -328,11 +417,26 @@ class MockBackend(Backend):
         extra = []
         for i in range(2, n + 1):  # group images
             p = out.with_name(f"{out.stem}_{i}{out.suffix}")
-            _draw_caption_image(p, title=f"{title} ({i}/{n})", prompt=prompt, w=w, h=h, rgb=_palette(prompt + str(i), seed), base_image=base)
+            _draw_caption_image(
+                p,
+                title=f"{title} ({i}/{n})",
+                prompt=prompt,
+                w=w,
+                h=h,
+                rgb=_palette(prompt + str(i), seed),
+                base_image=base,
+            )
             extra.append(str(p))
         usage = _mock_image_tokens(w, h, n)
         record_usage({"tool": title.split()[-1], "backend": self.name, "kind": "image", "generated_images": n, **usage})
-        return GenResult(out, self.name, "image", usage=usage, meta={"prompt": prompt, "seed": seed, "size": [w, h]}, extra_paths=extra)
+        return GenResult(
+            out,
+            self.name,
+            "image",
+            usage=usage,
+            meta={"prompt": prompt, "seed": seed, "size": [w, h]},
+            extra_paths=extra,
+        )
 
     def text2image(self, *, prompt, out, width, height, seed, max_images=1):
         return self._img("mock text2image", prompt, out, width, height, seed, n=max_images)
@@ -355,38 +459,101 @@ class MockBackend(Backend):
         rw = max(2, (bw * rh // bh) // 2 * 2)  # keep even
         with tempfile.TemporaryDirectory() as td:
             frame = Path(td) / "frame.png"
-            _draw_caption_image(frame, title=title, prompt=prompt, w=rw, h=rh, rgb=_palette(prompt, seed), base_image=base)
+            _draw_caption_image(
+                frame, title=title, prompt=prompt, w=rw, h=rh, rgb=_palette(prompt, seed), base_image=base
+            )
             _image_to_clip(frame, out, seconds=seconds, fps=DEFAULT_FPS, w=rw, h=rh)
         extra = []
         if return_last_frame:
             lf = out.with_name(f"{out.stem}_lastframe.png")
-            _draw_caption_image(lf, title=f"{title} · last frame", prompt=prompt, w=rw, h=rh, rgb=_palette(prompt, seed), base_image=base)
+            _draw_caption_image(
+                lf,
+                title=f"{title} · last frame",
+                prompt=prompt,
+                w=rw,
+                h=rh,
+                rgb=_palette(prompt, seed),
+                base_image=base,
+            )
             extra.append(str(lf))
         usage = _mock_video_tokens(bw, bh, seconds)  # bill at requested resolution
-        record_usage({"tool": title.split()[-1], "backend": self.name, "kind": "video", "seconds": seconds, "resolution": resolution, **usage})
-        return GenResult(out, self.name, "video", usage=usage,
-                         meta={"prompt": prompt, "seconds": seconds, "seed": seed, "resolution": resolution, "ratio": ratio, "render_size": [rw, rh]},
-                         extra_paths=extra)
+        record_usage(
+            {
+                "tool": title.split()[-1],
+                "backend": self.name,
+                "kind": "video",
+                "seconds": seconds,
+                "resolution": resolution,
+                **usage,
+            }
+        )
+        return GenResult(
+            out,
+            self.name,
+            "video",
+            usage=usage,
+            meta={
+                "prompt": prompt,
+                "seconds": seconds,
+                "seed": seed,
+                "resolution": resolution,
+                "ratio": ratio,
+                "render_size": [rw, rh],
+            },
+            extra_paths=extra,
+        )
 
     def text2video(self, *, prompt, out, seconds, resolution, ratio, seed, camera_fixed, watermark, generate_audio):
         return self._video("mock text2video", prompt, out, seconds, resolution, ratio, seed)
 
-    def image2video(self, *, prompt, first_frame, last_frame, out, seconds, resolution, ratio, seed, camera_fixed, watermark, generate_audio, return_last_frame):
+    def image2video(
+        self,
+        *,
+        prompt,
+        first_frame,
+        last_frame,
+        out,
+        seconds,
+        resolution,
+        ratio,
+        seed,
+        camera_fixed,
+        watermark,
+        generate_audio,
+        return_last_frame,
+    ):
         ff = Path(first_frame)
         if not ff.is_file():
             raise MediaError(f"first-frame image not found: {ff}")
         note = prompt + (f"  [+last_frame:{Path(last_frame).name}]" if last_frame else "")
-        return self._video("mock image2video", note, out, seconds, resolution, ratio, seed, base=ff, return_last_frame=return_last_frame)
+        return self._video(
+            "mock image2video",
+            note,
+            out,
+            seconds,
+            resolution,
+            ratio,
+            seed,
+            base=ff,
+            return_last_frame=return_last_frame,
+        )
 
-    def ref2video(self, *, prompt, images, videos, audios, out, seconds, resolution, ratio, seed, watermark, generate_audio):
+    def ref2video(
+        self, *, prompt, images, videos, audios, out, seconds, resolution, ratio, seed, watermark, generate_audio
+    ):
         images = [Path(p) for p in (images or [])]
         base = images[0] if images and images[0].is_file() else None
         tag = f"  [refs img:{len(images)} vid:{len(videos or [])} aud:{len(audios or [])}]"
         return self._video("mock ref2video", prompt + tag, out, seconds, resolution, ratio, seed, base=base)
 
     def video_task(self, *, op, task_id) -> dict:
-        return {"ok": True, "backend": self.name, "op": op, "task_id": task_id,
-                "note": "mock backend generates videos synchronously; there is no async task to query/cancel."}
+        return {
+            "ok": True,
+            "backend": self.name,
+            "op": op,
+            "task_id": task_id,
+            "note": "mock backend generates videos synchronously; there is no async task to query/cancel.",
+        }
 
 
 # --------------------------------------------------------------------------
@@ -432,7 +599,9 @@ class VolcBackend(Backend):
     def __init__(self) -> None:
         self.api_key = _env("ARK_API_KEY", "VOLC_API_KEY", "VOLCENGINE_API_KEY")
         if not self.api_key:
-            raise MediaError("Volc backend needs an Ark API key: set ARK_API_KEY (long-lived key from the Volcengine console).")
+            raise MediaError(
+                "Volc backend needs an Ark API key: set ARK_API_KEY (long-lived key from the Volcengine console)."
+            )
         self.base = ARK_BASE_URL.rstrip("/")
         self.image_model = _env("VOLC_IMAGE_MODEL", default="doubao-seedream-4-0-250828")
         self.video_model = _env("VOLC_VIDEO_MODEL", default="doubao-seedance-1-0-pro-250528")
@@ -465,7 +634,13 @@ class VolcBackend(Backend):
     # ---- images ----
     def _images_generation(self, *, prompt, images, out, size, max_images, tool):
         out = Path(out)
-        body: dict = {"model": self.image_model, "prompt": prompt, "size": size, "response_format": "url", "watermark": False}
+        body: dict = {
+            "model": self.image_model,
+            "prompt": prompt,
+            "size": size,
+            "response_format": "url",
+            "watermark": False,
+        }
         if images:
             enc = [_as_url_or_datauri(str(p), "image") for p in images]
             body["image"] = enc if len(enc) > 1 else enc[0]
@@ -485,10 +660,25 @@ class VolcBackend(Backend):
             self._save_image_item(it, p)
             extra.append(str(p))
         usage = data.get("usage") or {}
-        record_usage({"tool": tool, "backend": self.name, "model": self.image_model, "kind": "image",
-                      "generated_images": usage.get("generated_images", len(items)),
-                      "output_tokens": usage.get("output_tokens", 0), "total_tokens": usage.get("total_tokens", 0)})
-        return GenResult(out, self.name, "image", usage=usage, meta={"prompt": prompt, "model": self.image_model, "size": size}, extra_paths=extra)
+        record_usage(
+            {
+                "tool": tool,
+                "backend": self.name,
+                "model": self.image_model,
+                "kind": "image",
+                "generated_images": usage.get("generated_images", len(items)),
+                "output_tokens": usage.get("output_tokens", 0),
+                "total_tokens": usage.get("total_tokens", 0),
+            }
+        )
+        return GenResult(
+            out,
+            self.name,
+            "image",
+            usage=usage,
+            meta={"prompt": prompt, "model": self.image_model, "size": size},
+            extra_paths=extra,
+        )
 
     @staticmethod
     def _save_image_item(item: dict, out: Path) -> None:
@@ -499,15 +689,43 @@ class VolcBackend(Backend):
             VolcBackend._download(item["url"], out)
 
     def text2image(self, *, prompt, out, width, height, seed, max_images=1):
-        return self._images_generation(prompt=prompt, images=None, out=out, size=f"{width}x{height}", max_images=max_images, tool="text2image")
+        return self._images_generation(
+            prompt=prompt, images=None, out=out, size=f"{width}x{height}", max_images=max_images, tool="text2image"
+        )
 
     def image2image(self, *, prompt, images, out, strength, seed, max_images=1):
-        return self._images_generation(prompt=prompt, images=[Path(p) for p in (images or [])], out=out, size="2K", max_images=max_images, tool="image2image")
+        return self._images_generation(
+            prompt=prompt,
+            images=[Path(p) for p in (images or [])],
+            out=out,
+            size="2K",
+            max_images=max_images,
+            tool="image2image",
+        )
 
     # ---- video (async task) ----
-    def _create_video_task(self, *, content: list[dict], seconds, resolution, ratio, seed, camera_fixed=False, watermark=False, generate_audio=None, return_last_frame=False) -> str:
-        body: dict = {"model": self.video_model, "content": content, "resolution": resolution, "ratio": ratio,
-                      "duration": seconds, "camera_fixed": camera_fixed, "watermark": watermark}
+    def _create_video_task(
+        self,
+        *,
+        content: list[dict],
+        seconds,
+        resolution,
+        ratio,
+        seed,
+        camera_fixed=False,
+        watermark=False,
+        generate_audio=None,
+        return_last_frame=False,
+    ) -> str:
+        body: dict = {
+            "model": self.video_model,
+            "content": content,
+            "resolution": resolution,
+            "ratio": ratio,
+            "duration": seconds,
+            "camera_fixed": camera_fixed,
+            "watermark": watermark,
+        }
         if seed is not None and seed >= 0:
             body["seed"] = seed
         if generate_audio is not None:
@@ -537,49 +755,149 @@ class VolcBackend(Backend):
                     self._download(content["last_frame_url"], lf)
                     extra.append(str(lf))
                 usage = res.get("usage") or {}
-                record_usage({"tool": tool, "backend": self.name, "model": self.video_model, "kind": "video",
-                              "seconds": res.get("duration", seconds), "resolution": res.get("resolution", resolution),
-                              "completion_tokens": usage.get("completion_tokens", 0), "total_tokens": usage.get("total_tokens", 0)})
-                return GenResult(out, self.name, "video", usage=usage,
-                                 meta={"task_id": task_id, "model": self.video_model, "resolution": res.get("resolution", resolution), "ratio": res.get("ratio")},
-                                 extra_paths=extra)
+                record_usage(
+                    {
+                        "tool": tool,
+                        "backend": self.name,
+                        "model": self.video_model,
+                        "kind": "video",
+                        "seconds": res.get("duration", seconds),
+                        "resolution": res.get("resolution", resolution),
+                        "completion_tokens": usage.get("completion_tokens", 0),
+                        "total_tokens": usage.get("total_tokens", 0),
+                    }
+                )
+                return GenResult(
+                    out,
+                    self.name,
+                    "video",
+                    usage=usage,
+                    meta={
+                        "task_id": task_id,
+                        "model": self.video_model,
+                        "resolution": res.get("resolution", resolution),
+                        "ratio": res.get("ratio"),
+                    },
+                    extra_paths=extra,
+                )
             if status in ("failed", "cancelled", "expired"):
                 raise MediaError(f"Ark video task {task_id} {status}: {json.dumps(res.get('error') or res)[:400]}")
             time.sleep(self.poll_interval)
-        raise MediaError(f"Ark video task {task_id} timed out after {self.poll_timeout}s (id={task_id}; cancel with video_task)")
+        raise MediaError(
+            f"Ark video task {task_id} timed out after {self.poll_timeout}s (id={task_id}; cancel with video_task)"
+        )
 
     def text2video(self, *, prompt, out, seconds, resolution, ratio, seed, camera_fixed, watermark, generate_audio):
         content = [{"type": "text", "text": prompt}]
-        tid = self._create_video_task(content=content, seconds=seconds, resolution=resolution, ratio=ratio, seed=seed, camera_fixed=camera_fixed, watermark=watermark, generate_audio=generate_audio)
+        tid = self._create_video_task(
+            content=content,
+            seconds=seconds,
+            resolution=resolution,
+            ratio=ratio,
+            seed=seed,
+            camera_fixed=camera_fixed,
+            watermark=watermark,
+            generate_audio=generate_audio,
+        )
         return self._poll_video(tid, out, tool="text2video", seconds=seconds, resolution=resolution)
 
-    def image2video(self, *, prompt, first_frame, last_frame, out, seconds, resolution, ratio, seed, camera_fixed, watermark, generate_audio, return_last_frame):
-        content: list[dict] = [{"type": "image_url", "image_url": {"url": _as_url_or_datauri(str(first_frame), "image")}, "role": "first_frame"}]
+    def image2video(
+        self,
+        *,
+        prompt,
+        first_frame,
+        last_frame,
+        out,
+        seconds,
+        resolution,
+        ratio,
+        seed,
+        camera_fixed,
+        watermark,
+        generate_audio,
+        return_last_frame,
+    ):
+        content: list[dict] = [
+            {
+                "type": "image_url",
+                "image_url": {"url": _as_url_or_datauri(str(first_frame), "image")},
+                "role": "first_frame",
+            }
+        ]
         if last_frame:
-            content.append({"type": "image_url", "image_url": {"url": _as_url_or_datauri(str(last_frame), "image")}, "role": "last_frame"})
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": _as_url_or_datauri(str(last_frame), "image")},
+                    "role": "last_frame",
+                }
+            )
         if prompt:
             content.append({"type": "text", "text": prompt})
-        tid = self._create_video_task(content=content, seconds=seconds, resolution=resolution, ratio=ratio, seed=seed, camera_fixed=camera_fixed, watermark=watermark, generate_audio=generate_audio, return_last_frame=return_last_frame)
+        tid = self._create_video_task(
+            content=content,
+            seconds=seconds,
+            resolution=resolution,
+            ratio=ratio,
+            seed=seed,
+            camera_fixed=camera_fixed,
+            watermark=watermark,
+            generate_audio=generate_audio,
+            return_last_frame=return_last_frame,
+        )
         return self._poll_video(tid, out, tool="image2video", seconds=seconds, resolution=resolution)
 
-    def ref2video(self, *, prompt, images, videos, audios, out, seconds, resolution, ratio, seed, watermark, generate_audio):
+    def ref2video(
+        self, *, prompt, images, videos, audios, out, seconds, resolution, ratio, seed, watermark, generate_audio
+    ):
         content: list[dict] = []
         for p in images or []:
-            content.append({"type": "image_url", "image_url": {"url": _as_url_or_datauri(str(p), "image")}, "role": "reference_image"})
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": _as_url_or_datauri(str(p), "image")},
+                    "role": "reference_image",
+                }
+            )
         for p in videos or []:
-            content.append({"type": "video_url", "video_url": {"url": _as_url_or_datauri(str(p), "video")}, "role": "reference_video"})
+            content.append(
+                {
+                    "type": "video_url",
+                    "video_url": {"url": _as_url_or_datauri(str(p), "video")},
+                    "role": "reference_video",
+                }
+            )
         for p in audios or []:
-            content.append({"type": "audio_url", "audio_url": {"url": _as_url_or_datauri(str(p), "audio")}, "role": "reference_audio"})
+            content.append(
+                {
+                    "type": "audio_url",
+                    "audio_url": {"url": _as_url_or_datauri(str(p), "audio")},
+                    "role": "reference_audio",
+                }
+            )
         if not content:
             raise MediaError("ref2video needs at least one reference image or video.")
         if prompt:
             content.append({"type": "text", "text": prompt})
-        tid = self._create_video_task(content=content, seconds=seconds, resolution=resolution, ratio=ratio, seed=seed, watermark=watermark, generate_audio=generate_audio)
+        tid = self._create_video_task(
+            content=content,
+            seconds=seconds,
+            resolution=resolution,
+            ratio=ratio,
+            seed=seed,
+            watermark=watermark,
+            generate_audio=generate_audio,
+        )
         return self._poll_video(tid, out, tool="ref2video", seconds=seconds, resolution=resolution)
 
     def video_task(self, *, op, task_id) -> dict:
         if op == "query":
-            return {"ok": True, "backend": self.name, "op": op, **self._request("GET", f"/contents/generations/tasks/{task_id}")}
+            return {
+                "ok": True,
+                "backend": self.name,
+                "op": op,
+                **self._request("GET", f"/contents/generations/tasks/{task_id}"),
+            }
         if op == "cancel":
             self._request("DELETE", f"/contents/generations/tasks/{task_id}")
             return {"ok": True, "backend": self.name, "op": op, "task_id": task_id, "note": "cancel/delete requested"}
