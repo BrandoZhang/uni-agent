@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Creation Agent</title>
+    <style>
+      :root {
+        --bg: #0f1116; --panel: #181b22; --panel2: #1f232c; --line: #2a2f3a;
+        --text: #e7e9ee; --muted: #9aa3b2; --accent: #ffce6a; --accent2: #6ab0ff;
+        --ok: #57d6a0; --err: #ff6b6b; --warn: #ffb454;
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: #f4f5f8; --panel: #ffffff; --panel2: #f0f2f6; --line: #e2e5ec;
+          --text: #1a1d24; --muted: #5b6472; --accent: #b8860b; --accent2: #2b6cb0;
+        }
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+             background: var(--bg); color: var(--text); }
+      .app { display: grid; grid-template-columns: 1fr 320px; grid-template-rows: auto 1fr auto;
+             height: 100vh; max-width: 1200px; margin: 0 auto; }
+      header { grid-column: 1 / -1; padding: 14px 20px; border-bottom: 1px solid var(--line);
+               display: flex; align-items: baseline; gap: 12px; }
+      header h1 { font-size: 18px; margin: 0; }
+      header .sub { color: var(--muted); font-size: 13px; }
+      #timeline { grid-column: 1; grid-row: 2; overflow-y: auto; padding: 18px 20px; }
+      aside { grid-column: 2; grid-row: 2; overflow-y: auto; padding: 18px; border-left: 1px solid var(--line);
+              background: var(--panel); }
+      footer { grid-column: 1 / -1; grid-row: 3; padding: 12px 20px; border-top: 1px solid var(--line);
+               display: flex; gap: 10px; background: var(--panel); }
+      textarea { flex: 1; resize: none; height: 52px; padding: 10px 12px; border-radius: 10px;
+                 border: 1px solid var(--line); background: var(--panel2); color: var(--text); font: inherit; }
+      button { padding: 0 18px; border: 0; border-radius: 10px; font: inherit; font-weight: 600;
+               cursor: pointer; background: var(--accent); color: #1a1a1a; }
+      button.ghost { background: var(--panel2); color: var(--text); border: 1px solid var(--line); }
+      button:disabled { opacity: .5; cursor: default; }
+      .msg { margin: 0 0 14px; }
+      .msg.user .bubble { background: var(--accent2); color: #08131f; margin-left: auto; }
+      .bubble { display: inline-block; max-width: 78%; padding: 9px 13px; border-radius: 13px;
+                background: var(--panel2); white-space: pre-wrap; }
+      .row.user { display: flex; }
+      .tool { border: 1px solid var(--line); border-radius: 12px; margin: 0 0 14px; overflow: hidden;
+              background: var(--panel); }
+      .tool .head { display: flex; align-items: center; gap: 8px; padding: 9px 13px; background: var(--panel2); }
+      .tool .name { font-weight: 700; color: var(--accent); }
+      .tool .cmd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+                   color: var(--muted); padding: 8px 13px; white-space: pre-wrap; word-break: break-all; }
+      .badge { margin-left: auto; font-size: 12px; padding: 2px 9px; border-radius: 999px; background: var(--panel);
+               border: 1px solid var(--line); color: var(--muted); }
+      .badge.ok { color: var(--ok); border-color: var(--ok); }
+      .badge.timeout, .badge.syntax_error, .badge.skipped { color: var(--err); border-color: var(--err); }
+      .art { padding: 10px 13px; }
+      .art img, .art video { max-width: 100%; border-radius: 8px; display: block; }
+      .art .cost { font-size: 12px; color: var(--muted); margin-top: 6px; }
+      aside h2 { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 10px; }
+      .kpi { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px dashed var(--line); }
+      .kpi b { font-variant-numeric: tabular-nums; }
+      .total { font-size: 22px; font-weight: 800; color: var(--accent); margin: 6px 0 16px; }
+      .bytool { font-size: 13px; }
+      .bytool .kpi b { color: var(--accent2); }
+      .status { color: var(--muted); font-size: 13px; margin-top: 10px; }
+      .hint { color: var(--muted); font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <header>
+        <h1>🎬 Creation Agent</h1>
+        <span class="sub" id="sub">chat + tool calls + inline results + live cost</span>
+      </header>
+
+      <main id="timeline">
+        <p class="hint">Describe a short film and press <b>Create</b>. The agent plans a storyboard, generates
+          reference assets + shots, concatenates a final film, and reports token cost — streamed live.
+          Offline demo uses a scripted storyboard; point the server at a real model for open-ended briefs.</p>
+      </main>
+
+      <aside>
+        <h2>Cost (tokens)</h2>
+        <div class="total" id="cost-total">0</div>
+        <div class="kpi"><span>LLM prompt</span><b id="c-prompt">0</b></div>
+        <div class="kpi"><span>LLM cached</span><b id="c-cached">0</b></div>
+        <div class="kpi"><span>LLM completion</span><b id="c-completion">0</b></div>
+        <div class="kpi"><span>LLM total</span><b id="c-llm">0</b></div>
+        <div class="kpi"><span>Tools total</span><b id="c-tools">0</b></div>
+        <h2 style="margin-top:18px">By tool</h2>
+        <div class="bytool" id="bytool"></div>
+        <div class="status" id="status">idle</div>
+      </aside>
+
+      <footer>
+        <textarea id="brief" placeholder="e.g. A lone astronaut exploring a red alien desert at dusk; keep the astronaut consistent across shots."></textarea>
+        <button id="go">Create</button>
+        <button id="cancel" class="ghost" disabled>Cancel</button>
+      </footer>
+    </div>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const timeline = $("timeline");
+      let session = null, es = null;
+      const cards = {}; // tool_call id -> DOM node
+
+      function add(el) { timeline.appendChild(el); timeline.scrollTop = timeline.scrollHeight; return el; }
+      function esc(s) { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; }
+
+      function userBubble(text) {
+        const row = document.createElement("div"); row.className = "row user";
+        row.innerHTML = `<div class="bubble">${esc(text)}</div>`; add(row);
+      }
+      function assistantBubble(text) {
+        const m = document.createElement("div"); m.className = "msg";
+        m.innerHTML = `<div class="bubble">${esc(text)}</div>`; add(m);
+      }
+      function toolCard(ev) {
+        const c = document.createElement("div"); c.className = "tool";
+        c.innerHTML = `<div class="head"><span class="name">${esc(ev.name)}</span>
+          <span class="badge running" data-role="badge">running…</span></div>
+          <div class="cmd">${esc(ev.command || "")}</div>`;
+        cards[ev.id] = c; add(c);
+      }
+      function toolResult(ev) {
+        const c = cards[ev.id]; if (!c) return;
+        const badge = c.querySelector('[data-role="badge"]');
+        badge.className = "badge " + (ev.status || "");
+        badge.textContent = ev.status || "done";
+        if (ev.artifact) {
+          const wrap = document.createElement("div"); wrap.className = "art";
+          const tag = ev.artifact.kind === "video"
+            ? `<video src="${ev.artifact.url}" controls playsinline></video>`
+            : `<img src="${ev.artifact.url}" alt="${esc(ev.name)}" />`;
+          const tokens = ev.usage && (ev.usage.total_tokens ?? "");
+          wrap.innerHTML = tag + (tokens !== "" ? `<div class="cost">${tokens} tokens</div>` : "");
+          c.appendChild(wrap);
+        }
+        timeline.scrollTop = timeline.scrollHeight;
+      }
+      function updateCost(ev) {
+        $("cost-total").textContent = ev.total_tokens.toLocaleString();
+        $("c-prompt").textContent = ev.llm.prompt_tokens.toLocaleString();
+        $("c-cached").textContent = ev.llm.cached_tokens.toLocaleString();
+        $("c-completion").textContent = ev.llm.completion_tokens.toLocaleString();
+        $("c-llm").textContent = ev.llm.total_tokens.toLocaleString();
+        $("c-tools").textContent = ev.tool_total_tokens.toLocaleString();
+        const bt = $("bytool"); bt.innerHTML = "";
+        for (const [name, tok] of Object.entries(ev.by_tool)) {
+          const r = document.createElement("div"); r.className = "kpi";
+          r.innerHTML = `<span>${esc(name)}</span><b>${tok.toLocaleString()}</b>`; bt.appendChild(r);
+        }
+      }
+      function setRunning(on) {
+        $("go").disabled = on; $("cancel").disabled = !on; $("brief").disabled = on;
+        $("status").textContent = on ? "running…" : "done";
+      }
+
+      function handle(ev) {
+        switch (ev.type) {
+          case "assistant": if (ev.text) assistantBubble(ev.text); break;
+          case "tool_call": toolCard(ev); break;
+          case "tool_result": toolResult(ev); break;
+          case "cost": updateCost(ev); break;
+          case "done": $("status").textContent = "finished: " + (ev.exit_reason || "done"); break;
+          case "error": assistantBubble("⚠️ " + ev.message); $("status").textContent = "error"; break;
+        }
+      }
+
+      async function start() {
+        const brief = $("brief").value.trim(); if (!brief) return;
+        userBubble(brief); setRunning(true);
+        const res = await fetch("/api/sessions", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ brief }),
+        });
+        const data = await res.json();
+        if (!data.session_id) { assistantBubble("⚠️ " + (data.error || "failed to start")); setRunning(false); return; }
+        session = data.session_id;
+        es = new EventSource(`/api/sessions/${session}/stream`);
+        es.onmessage = (e) => { try { handle(JSON.parse(e.data)); } catch (_) {} };
+        es.addEventListener("end", () => { es.close(); setRunning(false); });
+        es.onerror = () => { es.close(); setRunning(false); };
+      }
+      async function cancel() {
+        if (!session) return;
+        $("cancel").disabled = true; $("status").textContent = "cancelling…";
+        await fetch(`/api/sessions/${session}/cancel`, { method: "POST" });
+      }
+
+      $("go").onclick = start;
+      $("cancel").onclick = cancel;
+      $("brief").addEventListener("keydown", (e) => {
+        if ((e.metaKey || e.ctrlKey) && e.key === "Enter") start();
+      });
+    </script>
+  </body>
+</html>
