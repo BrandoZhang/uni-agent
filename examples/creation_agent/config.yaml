@@ -27,12 +27,18 @@
       type: local_native      # pexpect bash on the host; no container, no GPU
     env_variables:
       MEDIA_BACKEND: mock      # set to `volc` for the real Ark API
-      MEDIA_USAGE_LOG: /tmp/creation_agent/usage.jsonl
-      MEDIA_WORKSPACE: /tmp/creation_agent/workspace
+      # Per-run workspace isolation: UniAgentLoop derives the effective
+      # workspace as <MEDIA_WORKSPACE_BASE>/<workspace_key>, keyed by this
+      # run's run_id (or a stable MEDIA_WORKSPACE_KEY the caller pins for a
+      # resumable session). It sets MEDIA_WORKSPACE + MEDIA_USAGE_LOG under
+      # that dir and cds the shell into it, so the `concurrency: 64` rollouts
+      # here never collide on artifacts or the cost ledger on the shared host
+      # FS. (Pin a static MEDIA_WORKSPACE instead to opt out.)
+      MEDIA_WORKSPACE_BASE: /tmp/creation_agent/workspace
+      # MEDIA_WORKSPACE_KEY: "<stable-session-id>"  # only for resumable sessions
       # ARK_API_KEY: "<your-ark-key>"        # required when MEDIA_BACKEND=volc
       # ARK_IMAGE_MODEL: "doubao-seedream-4-0-250828"
       # ARK_VIDEO_MODEL: "doubao-seedance-1-0-pro-250528"
-    post_setup_cmd: "mkdir -p /tmp/creation_agent/workspace && cd /tmp/creation_agent/workspace"
 
   # Structured (OpenAI) tool calls come back from the serving model; the
   # parser only matters for text-format models. hermes/qwen3_coder both work.
@@ -60,4 +66,9 @@
   reward:
     name: media_creation
     cost_weight: 0.0001        # reward = quality_proxy - cost_weight * total_tokens
+    # `workspace` is the fallback dir the reward probes for the final film when
+    # the trajectory names none. When per-run isolation is on (MEDIA_WORKSPACE_BASE
+    # above), UniAgentLoop overrides this with the resolved <base>/<run_id> so the
+    # probe matches where this run actually wrote. It only matters if you opt out
+    # of isolation (pin a static MEDIA_WORKSPACE instead).
     workspace: /tmp/creation_agent/workspace

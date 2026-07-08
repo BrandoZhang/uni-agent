@@ -160,6 +160,49 @@ report the total.
 
 ---
 
+## Workspace isolation (concurrent / long-horizon tasks)
+
+Creation is IO to a filesystem + HTTP calls — it does **not** need a sandbox
+for safety the way arbitrary code execution does — so the local filesystem is
+a fine substrate for a workspace. But on a **shared** filesystem
+(`local_native` / `host`, where every rollout sees the same host FS) isolation
+is *not* automatic: the agent picks its own output names (`ref.png`,
+`final.mp4`, …), so two concurrent tasks that pick the same name would
+overwrite each other's artifacts and share the cost ledger. (Container
+backends — `modal` / `vefaas` / `local` — isolate the FS per run for free.)
+
+So the workspace is keyed by a **`workspace_key`**: the effective directory is
+`<base>/<workspace_key>`.
+
+- **What is one "run"?** A *run* is one full trajectory — a task from the
+  initial prompt to its terminal state. However many turns it takes (reflect,
+  regenerate shot 3, re-cut the film) and even across a **partial-rollout**
+  pause/resume, it stays **one `run_id`, one workspace**: the assets
+  accumulate in one place, which is exactly what continuity needs. Two
+  *different* tasks (or a re-sample of the same prompt) get different keys and
+  never collide.
+
+- **Training / offline eval** — one rollout *is* one task's whole lifecycle,
+  so `workspace_key` defaults to the per-rollout `run_id` (a fresh uuid per
+  run is exactly right). `UniAgentLoop` derives this automatically when
+  `env.env_variables.MEDIA_WORKSPACE_BASE` is set (see `config.yaml`); it sets
+  `MEDIA_WORKSPACE` + `MEDIA_USAGE_LOG` under `<base>/<run_id>` and `cd`s the
+  shell there. No tool changes, no per-task wiring.
+
+- **Interactive, resumable serving** — a real user returning hours later to
+  keep editing the *same* project spans many model invocations (many `run_id`s),
+  so a per-invocation uuid would hand them an empty workspace and lose prior
+  assets. Pin a stable **`MEDIA_WORKSPACE_KEY`** (a conversation / task id from
+  the caller); the same key maps to the same dir, so the artifacts persist and
+  the task resumes. `demo.py` mirrors this with `CREATION_SESSION_ID`
+  (defaulting to `run_id`).
+
+The rule of thumb: the isolation key is **"one per independent task, stable
+for that task's whole lifetime"** — `run_id` satisfies that for a one-shot
+rollout; a caller-supplied session id satisfies it for a resumable session.
+Cost accounting is already concurrency-safe regardless (the reward derives
+tokens from *this* run's trajectory, never the shared ledger).
+
 ## Two entrypoints
 
 - **`demo.py`** — standalone `AgentInteraction` run; endpoint via env vars.

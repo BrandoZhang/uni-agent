@@ -19,6 +19,7 @@ from uni_agent.interaction import (
 )
 from uni_agent.reward import load_reward_spec
 from uni_agent.skills import SkillsManager, SkillsManagerConfig
+from uni_agent.workspace import compose_post_setup_cmd, resolve_media_workspace
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput
 from verl.experimental.agent_loop.utils import resolve_config_path
 
@@ -50,6 +51,8 @@ class UniAgentLoop(AgentLoopBase):
     # (replay disabled or the model is dense / not MoE).
     _routing_replay_shape: tuple[int, int] | None = None
     _routing_replay_resolved: bool = False
+    # Resolved per-run/per-session media workspace (None when isolation is off).
+    media_workspace: str | None = None
 
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
         config_dict = self._init_config(sampling_params, **kwargs)
@@ -62,6 +65,21 @@ class UniAgentLoop(AgentLoopBase):
 
         self.run_id = str(uuid.uuid4())
         self.logger = get_logger("agent-loop", run_id=self.run_id)
+
+        # Per-run / per-session media workspace isolation (opt-in via
+        # MEDIA_WORKSPACE_BASE). Keyed by a stable MEDIA_WORKSPACE_KEY if the
+        # caller supplied one (resumable interactive session), else this run's
+        # run_id (one-shot rollout). Keeps concurrent rollouts on a shared FS
+        # from colliding on artifacts / the cost ledger.
+        env_config = config_dict["env"]
+        env_config["env_variables"], self.media_workspace = resolve_media_workspace(
+            env_config.get("env_variables"), self.run_id
+        )
+        if self.media_workspace is not None:
+            env_config["post_setup_cmd"] = compose_post_setup_cmd(
+                env_config.get("post_setup_cmd"), self.media_workspace
+            )
+
         # init chat model, tools manager and environment
         self.chat_model = self._init_chat_model(config_dict["model"])
         self.tools_manager = self._init_tools_manager(
@@ -86,6 +104,12 @@ class UniAgentLoop(AgentLoopBase):
                 "run_id": self.run_id,
                 "env": self.env,
             }
+            # The reward runs in this (host) process, so env_variables exported
+            # inside the sandbox are invisible to it; hand it the resolved
+            # per-run workspace directly so its film probe / fallback path
+            # match where this run actually wrote its artifacts.
+            if self.media_workspace is not None:
+                reward_config["workspace"] = self.media_workspace
             self.reward_spec = load_reward_spec(reward_config)
         else:
             self.reward_spec = None

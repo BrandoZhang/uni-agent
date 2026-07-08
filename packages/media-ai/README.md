@@ -38,7 +38,12 @@ python -m media_ai text2image --prompt "a red bicycle" --output bike.png   # equ
 
 Every generation prints a one-line JSON result with the artifact `path` and a
 `usage` block (token cost), and appends the same to a usage ledger
-(`$MEDIA_USAGE_LOG`, default `./media_usage.jsonl`).
+(`$MEDIA_USAGE_LOG`, default `./media_usage.jsonl`). Point `MEDIA_USAGE_LOG`
+(and each `--output`) at a **per-task directory** when several tasks run
+concurrently on a shared filesystem, so their artifacts and ledgers don't
+collide — the uni-agent harness derives one automatically (see
+`examples/creation_agent`), but the CLI itself is agnostic: give it whatever
+paths you want.
 
 ## Backends
 

@@ -54,10 +54,21 @@ from uni_agent.tools import ToolConfig
 run_id = str(uuid.uuid4())
 
 # --- workspace + config ----------------------------------------------------
-workspace = Path(os.getenv("CREATION_WORKSPACE", str(Path.home() / ".uni-agent" / "app" / "creation" / "workspace")))
+# Per-run / per-session isolation, mirroring UniAgentLoop.resolve_media_workspace:
+# the effective workspace is <base>/<workspace_key>. workspace_key is a stable
+# CREATION_SESSION_ID if you pin one (a resumable session that spans multiple
+# runs keeps its prior artifacts), else this run's run_id (a one-shot demo gets
+# a fresh dir, so concurrent demos never collide).
+workspace_base = Path(
+    os.getenv("CREATION_WORKSPACE", str(Path.home() / ".uni-agent" / "app" / "creation" / "workspace"))
+)
+session_key = os.getenv("CREATION_SESSION_ID") or run_id
+resuming = bool(os.getenv("CREATION_SESSION_ID"))
+workspace = workspace_base / session_key
 workspace.mkdir(parents=True, exist_ok=True)
 usage_log = workspace / "usage.jsonl"
-usage_log.unlink(missing_ok=True)  # fresh cost ledger per run
+if not resuming:
+    usage_log.unlink(missing_ok=True)  # fresh cost ledger for a fresh run
 
 media_backend = os.getenv("MEDIA_BACKEND", "mock").lower()
 skills_dir = Path(os.getenv("CREATION_SKILLS_DIR", str(REPO_ROOT / "skills")))
@@ -87,7 +98,7 @@ print("=" * 80)
 print("Multimodal creation agent")
 print("=" * 80)
 print(f"Run ID:          {run_id}")
-print(f"Workspace:       {workspace}")
+print(f"Workspace:       {workspace}  (key={session_key}{', resuming' if resuming else ''})")
 print(f"Media backend:   {media_backend}")
 print(f"LLM endpoint:    {base_url}  ({'scripted mock' if using_mock_llm else 'real'})")
 print(f"Model name:      {model_name}")
