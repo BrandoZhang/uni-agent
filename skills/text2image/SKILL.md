@@ -9,7 +9,7 @@ Generate one image (or a related group) from a text prompt. No input image.
 
 ## Command
 ```
-text2image --prompt "<description>" --output <path.png> [--width 768] [--height 432] [--max_images 1] [--seed N] [--backend mock|volc]
+text2image --prompt "<description>" --output <path.png> [--width 768] [--height 432] [--max_images 1] [--seed N] [--model <id>] [--backend mock|volc]
 ```
 Prints one JSON line with the artifact `path` and a `usage` (token cost) block.
 
@@ -37,3 +37,11 @@ Too many competing details dilute the result — keep the most important ones.
 Image cost scales with pixels (`output_tokens ≈ images · ⌊w·h/256⌋`). Cost is
 an evaluation metric — use the smallest size and fewest images that meet the
 brief. Check the `usage` in the result.
+
+## Model
+`--model` selects the Ark image Model ID (optional). Default:
+`doubao-seedream-4-5-251128` (override globally with `$ARK_IMAGE_MODEL`).
+Examples: `doubao-seedream-5-0-260128`, `doubao-seedream-4-5-251128`,
+`doubao-seedream-4-0-250828`. A model must be **enabled for your account**;
+see the full Model ID list at
+https://www.volcengine.com/docs/82379/1330310 (or the Ark console model list).

@@ -34,6 +34,7 @@ class Text2ImageArgs(BaseModel):
     height: int = Field(default=432, description="Image height in pixels.")
     max_images: int = Field(default=1, description="If >1, generate a related group of images (saved as output, output_2, ...).")
     seed: int | None = Field(default=None, description="Optional seed for reproducibility.")
+    model: str | None = Field(default=None, description="Ark image Model ID (e.g. doubao-seedream-5-0-260128 / doubao-seedream-4-5-251128); omit for the default.")
     backend: str | None = Field(default=None, description="mock (default, offline) or volc (real API).")
 
 
@@ -44,6 +45,7 @@ class Image2ImageArgs(BaseModel):
     strength: float = Field(default=0.6, description="How much to follow the prompt vs the reference (0-1).")
     max_images: int = Field(default=1, description="If >1, generate a related group.")
     seed: int | None = Field(default=None, description="Optional seed for reproducibility.")
+    model: str | None = Field(default=None, description="Ark image Model ID (e.g. doubao-seedream-5-0-260128 / doubao-seedream-4-5-251128); omit for the default.")
     backend: str | None = Field(default=None, description="mock (default) or volc (real API).")
 
 
@@ -58,6 +60,7 @@ class Text2VideoArgs(BaseModel):
     watermark: bool = Field(default=False, description="Add an AI watermark.")
     generate_audio: bool | None = Field(default=None, description="Generate synced audio (Seedance 2.0/1.5).")
     wait: bool = Field(default=True, description="Wait for the clip. Set false (volc) to submit and return a task_id to poll with video_task, so you don't block.")
+    model: str | None = Field(default=None, description="Ark video Model ID (e.g. doubao-seedance-2-0-260128); omit for the default.")
     backend: str | None = Field(default=None, description="mock (default) or volc (real API).")
 
 
@@ -75,6 +78,7 @@ class Image2VideoArgs(BaseModel):
     generate_audio: bool | None = Field(default=None, description="Generate synced audio.")
     return_last_frame: bool = Field(default=False, description="Also return the clip's last frame (to chain the next shot).")
     wait: bool = Field(default=True, description="Wait for the clip. Set false (volc) to submit and return a task_id to poll with video_task, so you don't block.")
+    model: str | None = Field(default=None, description="Ark video Model ID (e.g. doubao-seedance-2-0-260128); omit for the default.")
     backend: str | None = Field(default=None, description="mock (default) or volc (real API).")
 
 
@@ -90,6 +94,8 @@ class Ref2VideoArgs(BaseModel):
     seed: int | None = Field(default=None, description="Optional seed.")
     watermark: bool = Field(default=False, description="Add an AI watermark.")
     generate_audio: bool | None = Field(default=None, description="Generate synced audio.")
+    wait: bool = Field(default=True, description="Wait for the clip. Set false (volc) to submit and return a task_id to poll with video_task, so you don't block.")
+    model: str | None = Field(default=None, description="Ark video Model ID (e.g. doubao-seedance-2-0-260128); omit for the default.")
     backend: str | None = Field(default=None, description="mock (default) or volc (real API).")
 
 

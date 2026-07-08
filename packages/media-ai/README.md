@@ -46,13 +46,20 @@ Every generation prints a one-line JSON result with the artifact `path` and a
   Deterministic given `(prompt, seed)`; costs nothing. Token counts are
   synthesized with the same formulas the real API documents.
 - **`volc`** (opt-in): Volcengine **Ark** API (Bearer API key). Set
-  `MEDIA_BACKEND=volc` and `ARK_API_KEY`, plus the Model IDs for your account:
+  `MEDIA_BACKEND=volc` and `ARK_API_KEY`. The Model ID is chosen per call with
+  `--model` (optional), else `$ARK_IMAGE_MODEL` / `$ARK_VIDEO_MODEL`, else a
+  built-in default:
 
   ```bash
   export MEDIA_BACKEND=volc ARK_API_KEY=...
-  export ARK_IMAGE_MODEL=doubao-seedream-4-0-250828
-  export ARK_VIDEO_MODEL=doubao-seedance-1-0-pro-250528
+  # optional global defaults (a per-call --model overrides them):
+  export ARK_IMAGE_MODEL=doubao-seedream-4-5-251128   # e.g. also 5-0-260128
+  export ARK_VIDEO_MODEL=doubao-seedance-2-0-260128
+  # or per call:  text2image --model doubao-seedream-5-0-260128 ...
   ```
+
+  A model must be **enabled for your account**; the full Model ID list is at
+  <https://www.volcengine.com/docs/82379/1330310>.
 
   Covers text/reference/group images and text/first-frame/first+last-frame/
   multimodal-reference video (async create → poll → cancel).

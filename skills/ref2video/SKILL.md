@@ -10,7 +10,7 @@ an optional prompt. At least one reference image or video is required.
 
 ## Command
 ```
-ref2video --images '["a.png","b.png"]' --prompt "<description>" --output <shot.mp4> [--videos '[...]'] [--audios '[...]'] [--seconds 5] [--resolution 480p] [--ratio adaptive] [--seed N] [--watermark false] [--generate_audio false] [--backend mock|volc]
+ref2video --images '["a.png","b.png"]' --prompt "<description>" --output <shot.mp4> [--videos '[...]'] [--audios '[...]'] [--seconds 5] [--resolution 480p] [--ratio adaptive] [--seed N] [--watermark false] [--generate_audio false] [--model <id>] [--backend mock|volc]
 ```
 `--images/--videos/--audios` each take a JSON array (or one/more paths/URLs).
 The real (volc) backend submits an async task and blocks until ready.
@@ -38,3 +38,10 @@ lowest resolution / shortest duration that meets the brief.
 Real video generation can take minutes. To avoid blocking, submit with `--wait false` (volc backend): it returns a `task_id` immediately. Then poll with `video_task --op query --id <task_id> --output <path>`, which downloads the clip once the task succeeds. Cancel a queued task with `video_task --op cancel --id <task_id>` to save cost. (The mock backend is synchronous and ignores `--wait`.)
 
 For **multiple shots**, you can emit several video tool calls in a single turn (the harness runs each and returns all results) rather than doing one shot per turn.
+
+## Model
+`--model` selects the Ark video Model ID (optional). Default:
+`doubao-seedance-2-0-260128` (override globally with `$ARK_VIDEO_MODEL`).
+Other families: `doubao-seedance-1-5-pro-*`, `doubao-seedance-1-0-pro-*`. A
+model must be **enabled for your account**; see the full Model ID list at
+https://www.volcengine.com/docs/82379/1330310 (or the Ark console model list).

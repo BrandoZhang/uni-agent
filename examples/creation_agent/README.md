@@ -103,13 +103,15 @@ MEDIA_BACKEND=volc ARK_API_KEY=<ark-key> \
   python examples/creation_agent/demo.py
 ```
 
-For the Volc backend, set the exact Model IDs for your account (they change
-over time and must be opened in the console):
+For the Volc backend the Model ID is chosen per call with `--model`
+(optional), else `$ARK_IMAGE_MODEL` / `$ARK_VIDEO_MODEL`, else a built-in
+default. Models must be enabled for your account (full list:
+<https://www.volcengine.com/docs/82379/1330310>):
 
 ```bash
-export ARK_API_KEY=...                 # long-lived Ark API key
-export ARK_IMAGE_MODEL=doubao-seedream-4-0-250828   # your image Model ID
-export ARK_VIDEO_MODEL=doubao-seedance-1-0-pro-250528 # your video Model ID
+export ARK_API_KEY=...                              # long-lived Ark API key
+export ARK_IMAGE_MODEL=doubao-seedream-4-5-251128   # optional global default
+export ARK_VIDEO_MODEL=doubao-seedance-2-0-260128   # optional global default
 ```
 
 ---

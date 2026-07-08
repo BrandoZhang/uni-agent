@@ -47,6 +47,7 @@ def main() -> int:
     ap.add_argument("--generate_audio", type=_bool, default=None)
     ap.add_argument("--return_last_frame", type=_bool, default=False)
     ap.add_argument("--wait", type=_bool, default=True)
+    ap.add_argument("--model", default=None, help="Ark video Model ID; default from $ARK_VIDEO_MODEL or built-in.")
     ap.add_argument("--backend", default=None)
     args = ap.parse_args()
     try:
@@ -64,6 +65,7 @@ def main() -> int:
             generate_audio=args.generate_audio,
             return_last_frame=args.return_last_frame,
             wait=args.wait,
+            model=args.model,
         )
     except mediakit.MediaError as e:
         print(f"Error: {e}", file=sys.stderr)

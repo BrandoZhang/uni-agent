@@ -9,7 +9,7 @@ Derive a new image from 1..N reference images and a prompt.
 
 ## Command
 ```
-image2image --images '["ref.png"]' --prompt "<description>" --output <path.png> [--strength 0.6] [--max_images 1] [--seed N] [--backend mock|volc]
+image2image --images '["ref.png"]' --prompt "<description>" --output <path.png> [--strength 0.6] [--max_images 1] [--seed N] [--model <id>] [--backend mock|volc]
 ```
 `--images` takes a JSON array (or one/more plain paths). Prints a JSON line
 with the artifact `path` and a `usage` block.
@@ -36,3 +36,11 @@ don't regenerate the character from scratch each time, or continuity breaks.
 ## Cost
 Scales with pixels/images; check `usage`. Prefer the fewest, smallest images
 that meet the brief.
+
+## Model
+`--model` selects the Ark image Model ID (optional). Default:
+`doubao-seedream-4-5-251128` (override globally with `$ARK_IMAGE_MODEL`).
+Examples: `doubao-seedream-5-0-260128`, `doubao-seedream-4-5-251128`,
+`doubao-seedream-4-0-250828`. A model must be **enabled for your account**;
+see the full Model ID list at
+https://www.volcengine.com/docs/82379/1330310 (or the Ark console model list).

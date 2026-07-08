@@ -41,6 +41,7 @@ def main() -> int:
     ap.add_argument("--strength", type=float, default=0.6)
     ap.add_argument("--max_images", type=int, default=1)
     ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--model", default=None, help="Ark image Model ID; default from $ARK_IMAGE_MODEL or built-in.")
     ap.add_argument("--backend", default=None)
     args = ap.parse_args()
     try:
@@ -51,6 +52,7 @@ def main() -> int:
             strength=args.strength,
             seed=args.seed,
             max_images=args.max_images,
+            model=args.model,
         )
     except mediakit.MediaError as e:
         print(f"Error: {e}", file=sys.stderr)

@@ -399,10 +399,22 @@ def dumps_result(res) -> str:
 class Backend:
     name = "base"
 
-    def text2image(self, *, prompt, out, width, height, seed, max_images=1): ...
-    def image2image(self, *, prompt, images, out, strength, seed, max_images=1): ...
+    def text2image(self, *, prompt, out, width, height, seed, max_images=1, model=None): ...
+    def image2image(self, *, prompt, images, out, strength, seed, max_images=1, model=None): ...
     def text2video(
-        self, *, prompt, out, seconds, resolution, ratio, seed, camera_fixed, watermark, generate_audio, wait=True
+        self,
+        *,
+        prompt,
+        out,
+        seconds,
+        resolution,
+        ratio,
+        seed,
+        camera_fixed,
+        watermark,
+        generate_audio,
+        wait=True,
+        model=None,
     ): ...
     def image2video(
         self,
@@ -420,6 +432,7 @@ class Backend:
         generate_audio,
         return_last_frame,
         wait=True,
+        model=None,
     ): ...
     def ref2video(
         self,
@@ -436,6 +449,7 @@ class Backend:
         watermark,
         generate_audio,
         wait=True,
+        model=None,
     ): ...
     def video_task(self, *, op, task_id, output=None) -> dict: ...
 
@@ -460,7 +474,7 @@ def _mock_video_tokens(w: int, h: int, seconds: int) -> dict:
 class MockBackend(Backend):
     name = "mock"
 
-    def _img(self, title, prompt, out, w, h, seed, base=None, n=1):
+    def _img(self, title, prompt, out, w, h, seed, base=None, n=1, model=None):
         out = Path(out)
         _ensure_parent(out)
         _draw_caption_image(out, title=title, prompt=prompt, w=w, h=h, rgb=_palette(prompt, seed), base_image=base)
@@ -484,24 +498,26 @@ class MockBackend(Backend):
             self.name,
             "image",
             usage=usage,
-            meta={"prompt": prompt, "seed": seed, "size": [w, h]},
+            meta={"prompt": prompt, "seed": seed, "size": [w, h], "model": model},
             extra_paths=extra,
         )
 
-    def text2image(self, *, prompt, out, width, height, seed, max_images=1):
-        return self._img("mock text2image", prompt, out, width, height, seed, n=max_images)
+    def text2image(self, *, prompt, out, width, height, seed, max_images=1, model=None):
+        return self._img("mock text2image", prompt, out, width, height, seed, n=max_images, model=model)
 
-    def image2image(self, *, prompt, images, out, strength, seed, max_images=1):
+    def image2image(self, *, prompt, images, out, strength, seed, max_images=1, model=None):
         images = [Path(p) for p in (images or [])]
         for p in images:
             if not p.is_file():
                 raise MediaError(f"reference image not found: {p}")
         base = images[0] if images else None
-        r = self._img("mock image2image", prompt, out, DEFAULT_W, DEFAULT_H, seed, base=base, n=max_images)
+        r = self._img("mock image2image", prompt, out, DEFAULT_W, DEFAULT_H, seed, base=base, n=max_images, model=model)
         r.meta.update({"refs": [str(p) for p in images], "strength": strength})
         return r
 
-    def _video(self, title, prompt, out, seconds, resolution, ratio, seed, base=None, return_last_frame=False):
+    def _video(
+        self, title, prompt, out, seconds, resolution, ratio, seed, base=None, return_last_frame=False, model=None
+    ):
         out = Path(out)
         _ensure_parent(out)
         bw, bh = video_dims(resolution, ratio)  # billed dims
@@ -549,15 +565,28 @@ class MockBackend(Backend):
                 "resolution": resolution,
                 "ratio": ratio,
                 "render_size": [rw, rh],
+                "model": model,
             },
             extra_paths=extra,
         )
 
     def text2video(
-        self, *, prompt, out, seconds, resolution, ratio, seed, camera_fixed, watermark, generate_audio, wait=True
+        self,
+        *,
+        prompt,
+        out,
+        seconds,
+        resolution,
+        ratio,
+        seed,
+        camera_fixed,
+        watermark,
+        generate_audio,
+        wait=True,
+        model=None,
     ):
         # mock generation is synchronous; `wait` is accepted for API parity.
-        return self._video("mock text2video", prompt, out, seconds, resolution, ratio, seed)
+        return self._video("mock text2video", prompt, out, seconds, resolution, ratio, seed, model=model)
 
     def image2video(
         self,
@@ -575,6 +604,7 @@ class MockBackend(Backend):
         generate_audio,
         return_last_frame,
         wait=True,
+        model=None,
     ):
         ff = Path(first_frame)
         if not ff.is_file():
@@ -590,6 +620,7 @@ class MockBackend(Backend):
             seed,
             base=ff,
             return_last_frame=return_last_frame,
+            model=model,
         )
 
     def ref2video(
@@ -607,11 +638,14 @@ class MockBackend(Backend):
         watermark,
         generate_audio,
         wait=True,
+        model=None,
     ):
         images = [Path(p) for p in (images or [])]
         base = images[0] if images and images[0].is_file() else None
         tag = f"  [refs img:{len(images)} vid:{len(videos or [])} aud:{len(audios or [])}]"
-        return self._video("mock ref2video", prompt + tag, out, seconds, resolution, ratio, seed, base=base)
+        return self._video(
+            "mock ref2video", prompt + tag, out, seconds, resolution, ratio, seed, base=base, model=model
+        )
 
     def video_task(self, *, op, task_id, output=None) -> dict:
         return {
@@ -670,8 +704,12 @@ class VolcBackend(Backend):
                 "Volc backend needs an Ark API key: set ARK_API_KEY (long-lived key from the Volcengine console)."
             )
         self.base = ARK_BASE_URL.rstrip("/")
-        self.image_model = _env("ARK_IMAGE_MODEL", default="doubao-seedream-4-0-250828")
-        self.video_model = _env("ARK_VIDEO_MODEL", default="doubao-seedance-1-0-pro-250528")
+        # Default Model IDs (a per-call ``model=`` or ``$ARK_IMAGE_MODEL`` /
+        # ``$ARK_VIDEO_MODEL`` override these). Model IDs are account-specific
+        # and must be enabled in the console -- see the model list at
+        # https://www.volcengine.com/docs/82379/1330310 .
+        self.image_model = _env("ARK_IMAGE_MODEL", default="doubao-seedream-4-5-251128")
+        self.video_model = _env("ARK_VIDEO_MODEL", default="doubao-seedance-2-0-260128")
         self.poll_interval = float(_env("ARK_POLL_INTERVAL", default="5") or 5)
         self.poll_timeout = float(_env("ARK_POLL_TIMEOUT", default="900") or 900)
 
@@ -726,10 +764,11 @@ class VolcBackend(Backend):
         return out
 
     # ---- images ----
-    def _images_generation(self, *, prompt, images, out, size, max_images, tool):
+    def _images_generation(self, *, prompt, images, out, size, max_images, tool, model=None):
         out = Path(out)
+        model_id = model or self.image_model
         body: dict = {
-            "model": self.image_model,
+            "model": model_id,
             "prompt": prompt,
             "size": size,
             "response_format": "url",
@@ -754,11 +793,12 @@ class VolcBackend(Backend):
             self._save_image_item(it, p)
             extra.append(str(p))
         usage = data.get("usage") or {}
+        used_model = data.get("model") or model_id
         record_usage(
             {
                 "tool": tool,
                 "backend": self.name,
-                "model": self.image_model,
+                "model": used_model,
                 "kind": "image",
                 "generated_images": usage.get("generated_images", len(items)),
                 "output_tokens": usage.get("output_tokens", 0),
@@ -770,7 +810,7 @@ class VolcBackend(Backend):
             self.name,
             "image",
             usage=usage,
-            meta={"prompt": prompt, "model": self.image_model, "size": size},
+            meta={"prompt": prompt, "model": used_model, "size": size},
             extra_paths=extra,
         )
 
@@ -782,7 +822,7 @@ class VolcBackend(Backend):
         elif item.get("url"):
             VolcBackend._download(item["url"], out)
 
-    def text2image(self, *, prompt, out, width, height, seed, max_images=1):
+    def text2image(self, *, prompt, out, width, height, seed, max_images=1, model=None):
         return self._images_generation(
             prompt=prompt,
             images=None,
@@ -790,9 +830,10 @@ class VolcBackend(Backend):
             size=_volc_image_size(width, height),
             max_images=max_images,
             tool="text2image",
+            model=model,
         )
 
-    def image2image(self, *, prompt, images, out, strength, seed, max_images=1):
+    def image2image(self, *, prompt, images, out, strength, seed, max_images=1, model=None):
         return self._images_generation(
             prompt=prompt,
             images=[Path(p) for p in (images or [])],
@@ -800,6 +841,7 @@ class VolcBackend(Backend):
             size=os.getenv("ARK_IMAGE_SIZE", "2K"),
             max_images=max_images,
             tool="image2image",
+            model=model,
         )
 
     # ---- video (async task) ----
@@ -815,9 +857,10 @@ class VolcBackend(Backend):
         watermark=False,
         generate_audio=None,
         return_last_frame=False,
+        model=None,
     ) -> str:
         body: dict = {
-            "model": self.video_model,
+            "model": model or self.video_model,
             "content": content,
             "resolution": resolution,
             "ratio": ratio,
@@ -852,11 +895,12 @@ class VolcBackend(Backend):
             self._download(content["last_frame_url"], lf)
             extra.append(str(lf))
         usage = res.get("usage") or {}
+        used_model = res.get("model") or self.video_model
         record_usage(
             {
                 "tool": tool,
                 "backend": self.name,
-                "model": self.video_model,
+                "model": used_model,
                 "kind": "video",
                 "seconds": res.get("duration", seconds),
                 "resolution": res.get("resolution", resolution),
@@ -871,7 +915,7 @@ class VolcBackend(Backend):
             usage=usage,
             meta={
                 "task_id": task_id,
-                "model": self.video_model,
+                "model": used_model,
                 "seconds": res.get("duration", seconds),
                 "resolution": res.get("resolution", resolution),
                 "ratio": res.get("ratio"),
@@ -915,7 +959,19 @@ class VolcBackend(Backend):
         )
 
     def text2video(
-        self, *, prompt, out, seconds, resolution, ratio, seed, camera_fixed, watermark, generate_audio, wait=True
+        self,
+        *,
+        prompt,
+        out,
+        seconds,
+        resolution,
+        ratio,
+        seed,
+        camera_fixed,
+        watermark,
+        generate_audio,
+        wait=True,
+        model=None,
     ):
         content = [{"type": "text", "text": prompt}]
         tid = self._create_video_task(
@@ -927,6 +983,7 @@ class VolcBackend(Backend):
             camera_fixed=camera_fixed,
             watermark=watermark,
             generate_audio=generate_audio,
+            model=model,
         )
         if not wait:
             return self._submitted(tid, Path(out), tool="text2video")
@@ -948,6 +1005,7 @@ class VolcBackend(Backend):
         generate_audio,
         return_last_frame,
         wait=True,
+        model=None,
     ):
         content: list[dict] = [
             {
@@ -976,6 +1034,7 @@ class VolcBackend(Backend):
             watermark=watermark,
             generate_audio=generate_audio,
             return_last_frame=return_last_frame,
+            model=model,
         )
         if not wait:
             return self._submitted(tid, Path(out), tool="image2video")
@@ -996,6 +1055,7 @@ class VolcBackend(Backend):
         watermark,
         generate_audio,
         wait=True,
+        model=None,
     ):
         content: list[dict] = []
         for p in images or []:
@@ -1034,6 +1094,7 @@ class VolcBackend(Backend):
             seed=seed,
             watermark=watermark,
             generate_audio=generate_audio,
+            model=model,
         )
         if not wait:
             return self._submitted(tid, Path(out), tool="ref2video")
