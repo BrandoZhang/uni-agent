@@ -30,8 +30,8 @@
       MEDIA_USAGE_LOG: /tmp/creation_agent/usage.jsonl
       MEDIA_WORKSPACE: /tmp/creation_agent/workspace
       # ARK_API_KEY: "<your-ark-key>"        # required when MEDIA_BACKEND=volc
-      # VOLC_IMAGE_MODEL: "doubao-seedream-4-0-250828"
-      # VOLC_VIDEO_MODEL: "doubao-seedance-1-0-pro-250528"
+      # ARK_IMAGE_MODEL: "doubao-seedream-4-0-250828"
+      # ARK_VIDEO_MODEL: "doubao-seedance-1-0-pro-250528"
     post_setup_cmd: "mkdir -p /tmp/creation_agent/workspace && cd /tmp/creation_agent/workspace"
 
   # Structured (OpenAI) tool calls come back from the serving model; the

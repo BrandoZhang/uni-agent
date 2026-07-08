@@ -50,8 +50,8 @@ Every generation prints a one-line JSON result with the artifact `path` and a
 
   ```bash
   export MEDIA_BACKEND=volc ARK_API_KEY=...
-  export VOLC_IMAGE_MODEL=doubao-seedream-4-0-250828
-  export VOLC_VIDEO_MODEL=doubao-seedance-1-0-pro-250528
+  export ARK_IMAGE_MODEL=doubao-seedream-4-0-250828
+  export ARK_VIDEO_MODEL=doubao-seedance-1-0-pro-250528
   ```
 
   Covers text/reference/group images and text/first-frame/first+last-frame/

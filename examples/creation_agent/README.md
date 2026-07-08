@@ -108,8 +108,8 @@ over time and must be opened in the console):
 
 ```bash
 export ARK_API_KEY=...                 # long-lived Ark API key
-export VOLC_IMAGE_MODEL=doubao-seedream-4-0-250828   # your image Model ID
-export VOLC_VIDEO_MODEL=doubao-seedance-1-0-pro-250528 # your video Model ID
+export ARK_IMAGE_MODEL=doubao-seedream-4-0-250828   # your image Model ID
+export ARK_VIDEO_MODEL=doubao-seedance-1-0-pro-250528 # your video Model ID
 ```
 
 ---

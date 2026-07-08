@@ -20,7 +20,7 @@ Backend for the media tools:
 
 * ``MEDIA_BACKEND=mock`` (default) -- offline Pillow/ffmpeg placeholders.
 * ``MEDIA_BACKEND=volc`` -- real Volcengine Ark API; also set ``ARK_API_KEY``
-  (and optionally ``VOLC_IMAGE_MODEL`` / ``VOLC_VIDEO_MODEL``).
+  (and optionally ``ARK_IMAGE_MODEL`` / ``ARK_VIDEO_MODEL``).
 
 Run (offline, mock everything):
 
@@ -104,7 +104,7 @@ env_variables = {
     "MEDIA_BACKEND": media_backend,
     "MEDIA_USAGE_LOG": str(usage_log),
 }
-for k in ("ARK_API_KEY", "VOLC_API_KEY", "VOLC_IMAGE_MODEL", "VOLC_VIDEO_MODEL"):
+for k in ("ARK_API_KEY", "ARK_IMAGE_MODEL", "ARK_VIDEO_MODEL"):
     if os.getenv(k):
         env_variables[k] = os.environ[k]
 

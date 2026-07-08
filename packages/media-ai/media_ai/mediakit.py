@@ -64,17 +64,17 @@ ARK_BASE_URL = os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/
 # Seedream 4.5/5.0 method-2 requires total pixels in [2560x1440, 4096x4096].
 # Small demo defaults (e.g. 768x432) are below the floor and would be rejected
 # by the real API, so the Volc image path resolves to a valid size.
-_VOLC_MIN_IMAGE_PIXELS = 2560 * 1440
+_ARK_MIN_IMAGE_PIXELS = 2560 * 1440
 
 
 def _volc_image_size(width: int, height: int) -> str:
-    """Resolve a valid Ark image ``size``. ``$VOLC_IMAGE_SIZE`` overrides; a
+    """Resolve a valid Ark image ``size``. ``$ARK_IMAGE_SIZE`` overrides; a
     below-floor W×H falls back to the ``2K`` named preset (the model then picks
     dimensions from the prompt)."""
-    override = os.getenv("VOLC_IMAGE_SIZE")
+    override = os.getenv("ARK_IMAGE_SIZE")
     if override:
         return override
-    if width * height >= _VOLC_MIN_IMAGE_PIXELS:
+    if width * height >= _ARK_MIN_IMAGE_PIXELS:
         return f"{width}x{height}"
     return "2K"
 
@@ -656,7 +656,7 @@ class VolcBackend(Backend):
     """Volcengine Ark API backend (API-Key / Bearer auth).
 
     Model IDs change over time and must be opened in your console; set them
-    via env (``VOLC_IMAGE_MODEL`` / ``VOLC_VIDEO_MODEL``). The defaults are
+    via env (``ARK_IMAGE_MODEL`` / ``ARK_VIDEO_MODEL``). The defaults are
     placeholders — override them with the exact Model IDs shown for your
     account (https://www.volcengine.com/docs/82379/1330310).
     """
@@ -664,16 +664,16 @@ class VolcBackend(Backend):
     name = "volc"
 
     def __init__(self) -> None:
-        self.api_key = _env("ARK_API_KEY", "VOLC_API_KEY", "VOLCENGINE_API_KEY")
+        self.api_key = _env("ARK_API_KEY")
         if not self.api_key:
             raise MediaError(
                 "Volc backend needs an Ark API key: set ARK_API_KEY (long-lived key from the Volcengine console)."
             )
         self.base = ARK_BASE_URL.rstrip("/")
-        self.image_model = _env("VOLC_IMAGE_MODEL", default="doubao-seedream-4-0-250828")
-        self.video_model = _env("VOLC_VIDEO_MODEL", default="doubao-seedance-1-0-pro-250528")
-        self.poll_interval = float(_env("VOLC_POLL_INTERVAL", default="5") or 5)
-        self.poll_timeout = float(_env("VOLC_POLL_TIMEOUT", default="900") or 900)
+        self.image_model = _env("ARK_IMAGE_MODEL", default="doubao-seedream-4-0-250828")
+        self.video_model = _env("ARK_VIDEO_MODEL", default="doubao-seedance-1-0-pro-250528")
+        self.poll_interval = float(_env("ARK_POLL_INTERVAL", default="5") or 5)
+        self.poll_timeout = float(_env("ARK_POLL_TIMEOUT", default="900") or 900)
 
     # ---- HTTP ----
     # Statuses worth retrying: rate limit (429) + transient server errors.
@@ -681,12 +681,12 @@ class VolcBackend(Backend):
 
     def _request(self, method: str, path: str, body: dict | None = None) -> dict:
         """POST/GET/DELETE against Ark with retry + exponential backoff on rate
-        limits (429) and transient 5xx. ``VOLC_MAX_RETRIES`` / ``VOLC_RETRY_BASE``
+        limits (429) and transient 5xx. ``ARK_MAX_RETRIES`` / ``ARK_RETRY_BASE``
         tune it (default 4 retries, 2s base)."""
         url = f"{self.base}{path}"
         data = json.dumps(body).encode("utf-8") if body is not None else None
-        max_retries = int(os.getenv("VOLC_MAX_RETRIES", "4"))
-        base_delay = float(os.getenv("VOLC_RETRY_BASE", "2"))
+        max_retries = int(os.getenv("ARK_MAX_RETRIES", "4"))
+        base_delay = float(os.getenv("ARK_RETRY_BASE", "2"))
         # A 429 means the request was rejected (rate limited) and NOT processed,
         # so it is always safe to retry. Transient 5xx / network errors, however,
         # may fire after the server already created a (billed) task, so retrying a
@@ -797,7 +797,7 @@ class VolcBackend(Backend):
             prompt=prompt,
             images=[Path(p) for p in (images or [])],
             out=out,
-            size=os.getenv("VOLC_IMAGE_SIZE", "2K"),
+            size=os.getenv("ARK_IMAGE_SIZE", "2K"),
             max_images=max_images,
             tool="image2image",
         )
