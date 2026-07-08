@@ -18,6 +18,13 @@
   mask_abnormal_exit_traj: false
 
   interaction:
+    # NOTE (real volc backend): a wait=True video call blocks while the CLI
+    # polls Ark for up to ARK_POLL_TIMEOUT (default 900s). If action_timeout is
+    # shorter, the harness kills the tool mid-poll; the CLI now cancels the
+    # in-flight Ark task on SIGTERM/SIGINT so it isn't orphaned/billed, but you
+    # still lose the clip. For real video either raise action_timeout to exceed
+    # ARK_POLL_TIMEOUT, or have the agent submit with wait=false and poll via
+    # video_task. The mock backend is synchronous, so 180 is fine for the demo.
     action_timeout: 180
     max_turns: 30
     chat_mode: false          # single-shot task (brief -> film), end on `finish`

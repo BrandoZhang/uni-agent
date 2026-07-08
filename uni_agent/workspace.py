@@ -93,5 +93,25 @@ def should_gc_workspace(env_variables: dict[str, str] | None, media_workspace: s
 def workspace_gc_command(workspace: str) -> str:
     """The (idempotent, best-effort) shell command that reclaims a run's
     workspace. Run it through ``env.communicate`` so it targets the FS the
-    artifacts actually live on."""
-    return f"rm -rf {shlex.quote(workspace)}"
+    artifacts actually live on. ``cd /`` first so the shell isn't sitting in
+    the directory being removed (avoids ``getcwd`` errors on later commands)."""
+    return f"cd / && rm -rf {shlex.quote(workspace)}"
+
+
+def gc_would_delete(workspace: str, protected: str) -> bool:
+    """True if ``rm -rf <workspace>`` would also remove ``protected`` — i.e.
+    ``protected`` is ``workspace`` itself or lives inside it.
+
+    Guards against a misconfiguration where ``MEDIA_WORKSPACE_BASE`` is pointed
+    at (a parent of) the loop's ``log_dir``: then ``<base>/<run_id>`` coincides
+    with ``<log_dir>/<run_id>`` = the run's ``output_dir``, and reclaiming the
+    workspace would silently destroy the just-saved training record
+    (rollout_cache.pkl / interaction_result.json / run.log).
+    """
+    ws = Path(workspace).expanduser()
+    pr = Path(protected).expanduser()
+    try:
+        pr.resolve(strict=False).relative_to(ws.resolve(strict=False))
+        return True
+    except ValueError:
+        return False

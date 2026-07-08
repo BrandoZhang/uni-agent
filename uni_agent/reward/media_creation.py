@@ -76,6 +76,10 @@ def _cost_and_film_from_trajectory(trajectory: list) -> tuple[dict, str | None]:
     totals = {"calls": 0, "images_generated": 0, "video_seconds": 0, "total_tokens": 0, "by_tool": {}}
     final_film: str | None = None
     last_video: str | None = None
+    # Async video tasks can appear in the trajectory more than once (the agent
+    # submits, then polls the same task id one or more times to download it).
+    # Each poll re-reports the same usage, so we count a given task id once.
+    seen_task_ids: set[str] = set()
     for step in trajectory:
         for tr in getattr(step, "tool_results", []) or []:
             name = getattr(tr, "name", "")
@@ -89,15 +93,27 @@ def _cost_and_film_from_trajectory(trajectory: list) -> tuple[dict, str | None]:
                 final_film = payload["path"]  # last concat wins
             elif kind == "video" and payload.get("path"):
                 last_video = payload["path"]
+
             usage = payload.get("usage") or {}
+            meta = payload.get("meta") or {}
             tok = int(usage.get("total_tokens", 0) or 0)
-            if tok or usage.get("generated_images"):
+            imgs = int(usage.get("generated_images", 0) or 0)
+            secs = int(meta.get("seconds", 0) or 0) if kind == "video" else 0
+            # Identify a generation by its result shape, NOT by whether it
+            # carried tokens: a real backend clip may report zero token usage,
+            # and we still must count its footage. `concat_video` (a join, no
+            # meta/usage) is naturally excluded — it has no tokens, images, or
+            # seconds. Skip a repeated poll of an already-counted async task.
+            task_id = payload.get("id") or meta.get("task_id")
+            duplicate = bool(task_id) and task_id in seen_task_ids
+            if not duplicate and (tok or imgs or secs):
                 totals["calls"] += 1
                 totals["total_tokens"] += tok
                 totals["by_tool"][name] = totals["by_tool"].get(name, 0) + tok
-                totals["images_generated"] += int(usage.get("generated_images", 0) or 0)
-                if kind == "video":
-                    totals["video_seconds"] += int((payload.get("meta") or {}).get("seconds", 0) or 0)
+                totals["images_generated"] += imgs
+                totals["video_seconds"] += secs
+                if task_id:
+                    seen_task_ids.add(task_id)
     return totals, (final_film or last_video)
 
 

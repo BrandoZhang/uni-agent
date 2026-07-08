@@ -129,6 +129,72 @@ def test_unknown_tool_with_usage_is_still_counted():
     assert totals["total_tokens"] == 42
 
 
+def test_zero_token_video_still_counts_seconds():
+    """A real backend clip that reports no token usage must still contribute its
+    footage (previously gated behind `if tok or generated_images`)."""
+    payload = {"ok": True, "kind": "video", "path": "/w/s.mp4", "usage": {}, "meta": {"seconds": 5}}
+    totals, film = _cost_and_film_from_trajectory([_step(_tr("text2video", payload))])
+    assert totals["video_seconds"] == 5
+    assert totals["calls"] == 1
+    assert totals["total_tokens"] == 0
+    assert film == "/w/s.mp4"
+
+
+def test_concat_join_is_not_counted_as_a_generation():
+    """concat_video (a join: no tokens/images/seconds) is the film but adds no
+    footage/cost, so it never inflates video_seconds."""
+    traj = [
+        _step(_tr("text2video", _vid("/w/s1.mp4", 100, 4))),
+        _step(_tr("concat_video", _concat("/w/final.mp4"))),
+    ]
+    totals, film = _cost_and_film_from_trajectory(traj)
+    assert totals["video_seconds"] == 4  # only the clip, not the concat
+    assert totals["calls"] == 1
+    assert film == "/w/final.mp4"
+
+
+def test_async_task_polled_twice_counts_once():
+    """Repeated `video_task` queries of the same task id re-report the same
+    usage; cost/footage must be counted a single time."""
+    finalized = {
+        "ok": True,
+        "kind": "video",
+        "path": "/w/shot.mp4",
+        "id": "task-42",
+        "usage": {"total_tokens": 300},
+        "meta": {"seconds": 5, "task_id": "task-42"},
+    }
+    traj = [
+        _step(_tr("video_task", finalized)),
+        _step(_tr("video_task", finalized)),  # a second poll of the same task
+    ]
+    totals, film = _cost_and_film_from_trajectory(traj)
+    assert totals["total_tokens"] == 300  # not 600
+    assert totals["video_seconds"] == 5  # not 10
+    assert totals["calls"] == 1
+    assert film == "/w/shot.mp4"
+
+
+def test_async_submit_then_finalize_counts_the_finalize():
+    """submit (wait=false, no usage) then finalize (usage) must count exactly
+    once — the submit's task id must not pre-empt the finalize."""
+    submit = {"ok": True, "kind": "video", "status": "queued", "task_id": "task-7", "output": "/w/shot.mp4"}
+    finalize = {
+        "ok": True,
+        "kind": "video",
+        "path": "/w/shot.mp4",
+        "id": "task-7",
+        "usage": {"total_tokens": 200},
+        "meta": {"seconds": 4, "task_id": "task-7"},
+    }
+    traj = [_step(_tr("text2video", submit)), _step(_tr("video_task", finalize))]
+    totals, film = _cost_and_film_from_trajectory(traj)
+    assert totals["total_tokens"] == 200
+    assert totals["video_seconds"] == 4
+    assert totals["calls"] == 1
+    assert film == "/w/shot.mp4"
+
+
 # --------------------------------------------------------------------------
 # end-to-end reward
 # --------------------------------------------------------------------------

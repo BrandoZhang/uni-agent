@@ -21,6 +21,7 @@ from uni_agent.reward import load_reward_spec
 from uni_agent.skills import SkillsManager, SkillsManagerConfig
 from uni_agent.workspace import (
     compose_post_setup_cmd,
+    gc_would_delete,
     resolve_media_workspace,
     should_gc_workspace,
     workspace_gc_command,
@@ -172,11 +173,20 @@ class UniAgentLoop(AgentLoopBase):
                 # accounting/cleanup must never fail the run. Runs after the
                 # reward, so cost/film were already extracted from the trajectory.
                 if self._gc_media_workspace and self.media_workspace is not None:
-                    try:
-                        await self.env.communicate(workspace_gc_command(self.media_workspace), check="ignore")
-                        self.logger.info(f"reclaimed workspace: {self.media_workspace}")
-                    except Exception as gc_exc:  # noqa: BLE001 - GC must never break teardown
-                        self.logger.warning(f"workspace GC failed for {self.media_workspace}: {gc_exc}")
+                    # Never reclaim a workspace that contains the run's own saved
+                    # training record (e.g. MEDIA_WORKSPACE_BASE misconfigured to
+                    # log_dir, making workspace == output_dir).
+                    if gc_would_delete(self.media_workspace, str(self.output_dir)):
+                        self.logger.warning(
+                            f"skipping workspace GC: {self.media_workspace} contains the run's "
+                            f"output_dir {self.output_dir} (set MEDIA_WORKSPACE_BASE outside log_dir)"
+                        )
+                    else:
+                        try:
+                            await self.env.communicate(workspace_gc_command(self.media_workspace), check="ignore")
+                            self.logger.info(f"reclaimed workspace: {self.media_workspace}")
+                        except Exception as gc_exc:  # noqa: BLE001 - GC must never break teardown
+                            self.logger.warning(f"workspace GC failed for {self.media_workspace}: {gc_exc}")
                 await self.env.close()
                 cleanup_handlers(self.run_id)
             return output

@@ -59,6 +59,13 @@ def test_video_dims_adaptive_and_fallback():
     assert mediakit.video_dims("nonsense", "16:9") == mediakit.video_dims("720p", "16:9")
 
 
+def test_video_dims_normalizes_case_and_whitespace():
+    # a wrong-case / padded resolution must not silently fall back to 720p
+    assert mediakit.video_dims("480P", "16:9") == mediakit.video_dims("480p", "16:9")
+    assert mediakit.video_dims(" 480p ", "16:9") == (864, 480)
+    assert mediakit.video_dims("1080P", "9:16") == mediakit.video_dims("1080p", "9:16")
+
+
 def test_mock_token_formulas_match_docs():
     # image: output_tokens = images * floor(w*h/256)
     assert mediakit._mock_image_tokens(768, 432, 2)["total_tokens"] == (768 * 432 // 256) * 2
@@ -238,6 +245,74 @@ def test_concat_clips_joins(tmp_path, _ledger):
 def test_concat_rejects_missing_input(tmp_path):
     with pytest.raises(mediakit.MediaError):
         mediakit.concat_clips([tmp_path / "nope.mp4"], tmp_path / "out.mp4")
+
+
+def _clip_with_audio(path, seconds=1):
+    """Render a tiny clip that HAS an audio track (silent), via bundled ffmpeg."""
+    import subprocess
+
+    subprocess.run(
+        [
+            mediakit.ffmpeg_exe(),
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=black:s=64x64:d={seconds}:r=24",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=44100:cl=stereo",
+            "-shortest",
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "aac",
+            "-pix_fmt",
+            "yuv420p",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_concat_preserves_audio_when_all_inputs_have_it(tmp_path, _ledger):
+    a, b = tmp_path / "a.mp4", tmp_path / "b.mp4"
+    _clip_with_audio(a)
+    _clip_with_audio(b)
+    assert mediakit._has_audio(a)  # sanity
+    final = tmp_path / "final.mp4"
+    mediakit.concat_clips([a, b], final, w=64, h=64)
+    assert final.is_file()
+    assert mediakit._has_audio(final), "concat must keep audio when every input has it"
+
+
+def test_concat_video_only_when_inputs_are_silent(tmp_path, _ledger):
+    # mock clips have no audio track -> concat is video-only, and must not fail
+    b = mediakit.MockBackend()
+    clips = []
+    for i in range(2):
+        p = tmp_path / f"c{i}.mp4"
+        b.text2video(
+            prompt=f"clip {i}",
+            out=p,
+            seconds=1,
+            resolution="480p",
+            ratio="16:9",
+            seed=i,
+            camera_fixed=False,
+            watermark=False,
+            generate_audio=None,
+        )
+        clips.append(p)
+    assert not mediakit._has_audio(clips[0])
+    final = tmp_path / "silent.mp4"
+    mediakit.concat_clips(clips, final, w=128, h=72)
+    assert final.is_file() and not mediakit._has_audio(final)
 
 
 # --------------------------------------------------------------------------

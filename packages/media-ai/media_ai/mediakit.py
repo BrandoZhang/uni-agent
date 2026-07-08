@@ -37,6 +37,7 @@ import json
 import os
 import random
 import shutil
+import signal
 import struct
 import subprocess
 import tempfile
@@ -127,8 +128,14 @@ def _ensure_parent(path: Path) -> None:
 
 
 def video_dims(resolution: str, ratio: str) -> tuple[int, int]:
-    """Best-effort (w, h) for a resolution+ratio, for cost accounting."""
-    res = _VIDEO_DIMS.get(resolution, _VIDEO_DIMS["720p"])
+    """Best-effort (w, h) for a resolution+ratio, for cost accounting.
+
+    Resolution/ratio are normalized (case, whitespace) so a ``480P`` or
+    `` 480p `` doesn't silently fall back to the 720p default and mis-bill the
+    clip at ~2x its real pixel cost.
+    """
+    res = _VIDEO_DIMS.get((resolution or "").strip().lower(), _VIDEO_DIMS["720p"])
+    ratio = (ratio or "").strip().lower()
     if ratio == "adaptive":
         ratio = "16:9"
     return res.get(ratio, res["16:9"])
@@ -325,6 +332,17 @@ def _image_to_clip(image: Path, out: Path, *, seconds: int, fps: int, w: int, h:
         )
 
 
+def _has_audio(path: Path) -> bool:
+    """True if the media file carries an audio stream. Uses the bundled ffmpeg
+    (no separate ffprobe needed): ``ffmpeg -i <file>`` prints stream info to
+    stderr and exits non-zero (no output specified), which we tolerate."""
+    try:
+        proc = subprocess.run([ffmpeg_exe(), "-hide_banner", "-i", str(path)], capture_output=True, text=True)
+    except Exception:  # noqa: BLE001 - treat probe failure as "no audio"
+        return False
+    return "Audio:" in (proc.stderr or "")
+
+
 def concat_clips(
     inputs: list[Path], out: Path, *, w: int = DEFAULT_W, h: int = DEFAULT_H, fps: int = DEFAULT_FPS
 ) -> Path:
@@ -335,6 +353,11 @@ def concat_clips(
     if not inputs:
         raise MediaError("concat needs at least one input clip")
     _ensure_parent(out)
+    # Preserve audio when every clip has an audio track (e.g. Seedance shots
+    # generated with generate_audio) — otherwise the joined film would be
+    # silent. Mixed audio/no-audio inputs can't be merged without synthesizing
+    # silence, so we fall back to a video-only join there (the safe default).
+    keep_audio = all(_has_audio(p) for p in inputs)
     args: list[str] = []
     for p in inputs:
         args += ["-i", str(p)]
@@ -342,20 +365,17 @@ def concat_clips(
     for i in range(len(inputs)):
         filters.append(f"[{i}:v]scale={w}:{h},fps={fps},format=yuv420p,setsar=1[v{i}]")
         labels += f"[v{i}]"
-    fc = ";".join(filters) + f";{labels}concat=n={len(inputs)}:v=1:a=0[outv]"
-    args += [
-        "-filter_complex",
-        fc,
-        "-map",
-        "[outv]",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-pix_fmt",
-        "yuv420p",
-        str(out),
-    ]
+        if keep_audio:
+            filters.append(f"[{i}:a]aresample=async=1[a{i}]")
+            labels += f"[a{i}]"
+    n = len(inputs)
+    fc = ";".join(filters) + (
+        f";{labels}concat=n={n}:v=1:a=1[outv][outa]" if keep_audio else f";{labels}concat=n={n}:v=1:a=0[outv]"
+    )
+    args += ["-filter_complex", fc, "-map", "[outv]"]
+    if keep_audio:
+        args += ["-map", "[outa]", "-c:a", "aac"]
+    args += ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", str(out)]
     _run_ffmpeg(args)
     return out
 
@@ -764,7 +784,7 @@ class VolcBackend(Backend):
         return out
 
     # ---- images ----
-    def _images_generation(self, *, prompt, images, out, size, max_images, tool, model=None):
+    def _images_generation(self, *, prompt, images, out, size, max_images, tool, model=None, seed=None):
         out = Path(out)
         model_id = model or self.image_model
         body: dict = {
@@ -774,6 +794,10 @@ class VolcBackend(Backend):
             "response_format": "url",
             "watermark": False,
         }
+        # Forward the seed for reproducibility (the tool/CLI advertise --seed);
+        # mirrors the video path. A negative sentinel means "unset".
+        if seed is not None and seed >= 0:
+            body["seed"] = seed
         if images:
             enc = [_as_url_or_datauri(str(p), "image") for p in images]
             body["image"] = enc if len(enc) > 1 else enc[0]
@@ -831,6 +855,7 @@ class VolcBackend(Backend):
             max_images=max_images,
             tool="text2image",
             model=model,
+            seed=seed,
         )
 
     def image2image(self, *, prompt, images, out, strength, seed, max_images=1, model=None):
@@ -842,6 +867,7 @@ class VolcBackend(Backend):
             max_images=max_images,
             tool="image2image",
             model=model,
+            seed=seed,
         )
 
     # ---- video (async task) ----
@@ -941,22 +967,53 @@ class VolcBackend(Backend):
             "note": "submitted; poll with `video_task --op query --id <task_id> --output <output>`.",
         }
 
+    def _cancel_task(self, task_id: str) -> None:
+        """Best-effort cancel/delete of an in-flight task (never raises)."""
+        try:
+            self._request("DELETE", f"/contents/generations/tasks/{task_id}")
+        except Exception:  # noqa: BLE001 - cancellation is best-effort
+            pass
+
     def _poll_video(self, task_id: str, out: Path, *, tool: str, seconds: int, resolution: str) -> GenResult:
         out = Path(out)
-        deadline = time.monotonic() + self.poll_timeout
-        while time.monotonic() < deadline:
-            res = self._request("GET", f"/contents/generations/tasks/{task_id}")
-            status = str(res.get("status", "")).lower()
-            if status == "succeeded":
-                return self._finalize_video(
-                    res, out, task_id=task_id, tool=tool, seconds=seconds, resolution=resolution
-                )
-            if status in ("failed", "cancelled", "expired"):
-                raise MediaError(f"Ark video task {task_id} {status}: {json.dumps(res.get('error') or res)[:400]}")
-            time.sleep(self.poll_interval)
-        raise MediaError(
-            f"Ark video task {task_id} timed out after {self.poll_timeout}s (id={task_id}; cancel with video_task)"
-        )
+
+        # The harness may kill this (blocking) tool at its action_timeout, which
+        # is typically shorter than poll_timeout. Without cancellation the Ark
+        # task keeps running and billing. Cancel the task if we're signalled
+        # (SIGTERM/SIGINT) or if we hit our own timeout, so a killed wait=True
+        # call doesn't orphan a billed task. (SIGKILL can't be caught — prefer
+        # wait=false + video_task, or set action_timeout >= ARK_POLL_TIMEOUT.)
+        def _on_signal(signum, _frame):
+            self._cancel_task(task_id)
+            raise MediaError(f"Ark video task {task_id} interrupted (signal {signum}); task cancelled")
+
+        prev_handlers: dict = {}
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                prev_handlers[sig] = signal.signal(sig, _on_signal)
+            except (ValueError, OSError):
+                pass  # not in the main thread; skip signal handling
+
+        try:
+            deadline = time.monotonic() + self.poll_timeout
+            while time.monotonic() < deadline:
+                res = self._request("GET", f"/contents/generations/tasks/{task_id}")
+                status = str(res.get("status", "")).lower()
+                if status == "succeeded":
+                    return self._finalize_video(
+                        res, out, task_id=task_id, tool=tool, seconds=seconds, resolution=resolution
+                    )
+                if status in ("failed", "cancelled", "expired"):
+                    raise MediaError(f"Ark video task {task_id} {status}: {json.dumps(res.get('error') or res)[:400]}")
+                time.sleep(self.poll_interval)
+            self._cancel_task(task_id)
+            raise MediaError(f"Ark video task {task_id} timed out after {self.poll_timeout}s (id={task_id}; cancelled)")
+        finally:
+            for sig, handler in prev_handlers.items():
+                try:
+                    signal.signal(sig, handler)
+                except (ValueError, OSError):
+                    pass
 
     def text2video(
         self,
@@ -1118,6 +1175,12 @@ class VolcBackend(Backend):
                 )
                 out["path"] = str(gen.path)
                 out["extra_paths"] = gen.extra_paths
+                # Tag the finalized clip like a generation result so downstream
+                # consumers (e.g. the reward's film discovery + footage totals)
+                # recognize an async-finalized one-shot the same as a wait=True
+                # clip. `**res` already carries the task `id` + `usage`.
+                out["kind"] = "video"
+                out["meta"] = gen.meta
             return out
         if op == "cancel":
             self._request("DELETE", f"/contents/generations/tasks/{task_id}")

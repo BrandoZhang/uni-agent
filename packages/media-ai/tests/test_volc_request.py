@@ -89,6 +89,18 @@ def test_image_response_without_images_raises(volc, monkeypatch, tmp_path):
         volc.text2image(prompt="p", out=tmp_path / "o.png", width=768, height=432, seed=1)
 
 
+def test_image_seed_is_forwarded(volc, monkeypatch, tmp_path):
+    calls = _capture(monkeypatch, volc, {"data": [{"b64_json": _PNG_1x1}], "usage": {}})
+    volc.text2image(prompt="p", out=tmp_path / "o.png", width=768, height=432, seed=42)
+    assert calls[0]["body"]["seed"] == 42  # reproducibility promise honored
+
+
+def test_image_seed_omitted_when_negative(volc, monkeypatch, tmp_path):
+    calls = _capture(monkeypatch, volc, {"data": [{"b64_json": _PNG_1x1}], "usage": {}})
+    volc.image2image(images=[], prompt="p", out=tmp_path / "o.png", strength=0.5, seed=-1)
+    assert "seed" not in calls[0]["body"]
+
+
 # --------------------------------------------------------------------------
 # video content construction
 # --------------------------------------------------------------------------
@@ -171,6 +183,25 @@ def test_ref2video_rejects_empty_references(volc, monkeypatch, tmp_path):
             generate_audio=None,
             wait=False,
         )
+
+
+def test_video_task_query_tags_finalized_clip(volc, monkeypatch, tmp_path):
+    """An async-finalized clip must be tagged kind=video + meta so the reward's
+    film discovery / footage totals recognize a one-shot async deliverable."""
+    monkeypatch.setattr(
+        volc,
+        "_request",
+        lambda *a, **k: {"id": "task-9", "status": "succeeded", "duration": 5, "usage": {"total_tokens": 12}},
+    )
+    fake = mediakit.GenResult(
+        tmp_path / "out.mp4", "volc", "video", usage={"total_tokens": 12}, meta={"seconds": 5, "task_id": "task-9"}
+    )
+    monkeypatch.setattr(volc, "_finalize_video", lambda *a, **k: fake)
+    out = volc.video_task(op="query", task_id="task-9", output=str(tmp_path / "out.mp4"))
+    assert out["kind"] == "video"
+    assert out["meta"] == {"seconds": 5, "task_id": "task-9"}
+    assert out["path"] == str(tmp_path / "out.mp4")
+    assert out["id"] == "task-9"  # from **res, used by the reward to dedup re-queries
 
 
 def test_ref2video_builds_multimodal_roles(volc, monkeypatch, tmp_path):

@@ -15,6 +15,7 @@ import pytest
 
 from uni_agent.workspace import (
     compose_post_setup_cmd,
+    gc_would_delete,
     resolve_media_workspace,
     should_gc_workspace,
     workspace_gc_command,
@@ -129,6 +130,21 @@ def test_gc_none_env_is_false():
 
 
 def test_workspace_gc_command_is_quoted_rm():
-    assert workspace_gc_command("/tmp/base/run-x") == "rm -rf /tmp/base/run-x"
+    # `cd /` first so the shell isn't inside the dir being removed
+    assert workspace_gc_command("/tmp/base/run-x") == "cd / && rm -rf /tmp/base/run-x"
     # paths with spaces are quoted so the shell sees a single argument
-    assert workspace_gc_command("/tmp/a b/run x") == "rm -rf '/tmp/a b/run x'"
+    assert workspace_gc_command("/tmp/a b/run x") == "cd / && rm -rf '/tmp/a b/run x'"
+
+
+def test_gc_would_delete_detects_output_dir_inside_workspace():
+    # workspace == output_dir (base misconfigured to log_dir) -> unsafe
+    assert gc_would_delete("/tmp/run/abc", "/tmp/run/abc") is True
+    # output_dir nested inside workspace -> unsafe
+    assert gc_would_delete("/tmp/run", "/tmp/run/abc/out") is True
+
+
+def test_gc_would_delete_false_for_disjoint_dirs():
+    # the shipped layout: workspace under a `workspace/` subdir, output_dir a sibling
+    assert gc_would_delete("/tmp/creation/workspace/abc", "/tmp/creation/abc") is False
+    # output_dir is a parent of workspace -> deleting workspace won't remove it
+    assert gc_would_delete("/tmp/run/abc", "/tmp/run") is False
