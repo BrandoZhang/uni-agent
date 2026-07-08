@@ -55,3 +55,43 @@ def compose_post_setup_cmd(existing: str | None, workspace: str) -> str:
     preserving any pre-existing ``post_setup_cmd``."""
     cd = f"mkdir -p {shlex.quote(workspace)} && cd {shlex.quote(workspace)}"
     return f"{existing} && {cd}" if existing else cd
+
+
+# Values that turn run-end workspace GC on (case-insensitive). GC is off unless
+# explicitly requested, so demo/eval runs keep their artifacts to inspect and
+# only large-scale/training runs reclaim disk.
+_GC_TRUTHY = frozenset({"1", "true", "yes", "on", "reclaim"})
+
+
+def should_gc_workspace(env_variables: dict[str, str] | None, media_workspace: str | None) -> bool:
+    """Whether ``UniAgentLoop`` should reclaim the per-run workspace at run end.
+
+    True only when **all** hold:
+
+    - a per-run workspace was actually derived (``media_workspace`` is not None);
+    - the caller did **not** pin a ``MEDIA_WORKSPACE_KEY`` — a session-keyed dir
+      is owned by the (resumable) session, not this run, so the loop must never
+      delete it;
+    - ``MEDIA_WORKSPACE_GC`` opts in (default off).
+
+    The deletion itself must run **through the env** (``rm -rf`` inside the
+    sandbox), not a host-side ``shutil.rmtree``: the artifacts live on the
+    container's FS for container backends and on the host FS for
+    ``local_native`` / ``host``. Going through the env deletes whichever one is
+    real and never risks a host path for a container run. On container backends
+    it is a harmless no-op-ish redundancy (``env.close()`` reclaims the FS
+    anyway); on a shared FS it is the only thing that reclaims disk.
+    """
+    if not media_workspace:
+        return False
+    env = env_variables or {}
+    if env.get("MEDIA_WORKSPACE_KEY"):
+        return False
+    return str(env.get("MEDIA_WORKSPACE_GC", "")).strip().lower() in _GC_TRUTHY
+
+
+def workspace_gc_command(workspace: str) -> str:
+    """The (idempotent, best-effort) shell command that reclaims a run's
+    workspace. Run it through ``env.communicate`` so it targets the FS the
+    artifacts actually live on."""
+    return f"rm -rf {shlex.quote(workspace)}"

@@ -19,7 +19,12 @@ from uni_agent.interaction import (
 )
 from uni_agent.reward import load_reward_spec
 from uni_agent.skills import SkillsManager, SkillsManagerConfig
-from uni_agent.workspace import compose_post_setup_cmd, resolve_media_workspace
+from uni_agent.workspace import (
+    compose_post_setup_cmd,
+    resolve_media_workspace,
+    should_gc_workspace,
+    workspace_gc_command,
+)
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput
 from verl.experimental.agent_loop.utils import resolve_config_path
 
@@ -53,6 +58,10 @@ class UniAgentLoop(AgentLoopBase):
     _routing_replay_resolved: bool = False
     # Resolved per-run/per-session media workspace (None when isolation is off).
     media_workspace: str | None = None
+    # Whether to reclaim `media_workspace` at run end (opt-in; never for
+    # session-keyed dirs). Deletion goes through the env, so it is correct for
+    # both a container FS and the shared host FS.
+    _gc_media_workspace: bool = False
 
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
         config_dict = self._init_config(sampling_params, **kwargs)
@@ -79,6 +88,7 @@ class UniAgentLoop(AgentLoopBase):
             env_config["post_setup_cmd"] = compose_post_setup_cmd(
                 env_config.get("post_setup_cmd"), self.media_workspace
             )
+        self._gc_media_workspace = should_gc_workspace(env_config.get("env_variables"), self.media_workspace)
 
         # init chat model, tools manager and environment
         self.chat_model = self._init_chat_model(config_dict["model"])
@@ -154,6 +164,19 @@ class UniAgentLoop(AgentLoopBase):
                 self.logger.critical(f"Agent loop failed before producing interaction result: {e}")
                 output = await self._build_empty_agent_output(exit_reason="agent_loop_failed")
             finally:
+                # Reclaim the per-run workspace (opt-in) BEFORE closing the env,
+                # while the bash session is still alive. Done via the env so it
+                # targets the FS the artifacts actually live on (container-local
+                # for container backends, host for local_native/host) — never a
+                # host-side rmtree that could hit the wrong path. Best-effort:
+                # accounting/cleanup must never fail the run. Runs after the
+                # reward, so cost/film were already extracted from the trajectory.
+                if self._gc_media_workspace and self.media_workspace is not None:
+                    try:
+                        await self.env.communicate(workspace_gc_command(self.media_workspace), check="ignore")
+                        self.logger.info(f"reclaimed workspace: {self.media_workspace}")
+                    except Exception as gc_exc:  # noqa: BLE001 - GC must never break teardown
+                        self.logger.warning(f"workspace GC failed for {self.media_workspace}: {gc_exc}")
                 await self.env.close()
                 cleanup_handlers(self.run_id)
             return output

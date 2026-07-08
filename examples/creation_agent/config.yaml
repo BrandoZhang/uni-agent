@@ -36,6 +36,14 @@
       # FS. (Pin a static MEDIA_WORKSPACE instead to opt out.)
       MEDIA_WORKSPACE_BASE: /tmp/creation_agent/workspace
       # MEDIA_WORKSPACE_KEY: "<stable-session-id>"  # only for resumable sessions
+      # Reclaim <base>/<run_id> at run end (after the reward). Off by default;
+      # on here because a 64-way training run would otherwise pile up artifacts.
+      # Deletion runs through the env (rm -rf inside the sandbox), so it's
+      # correct for both a container FS and this shared host FS; a container
+      # backend reclaims the FS at close() anyway, making this a no-op there.
+      # NOTE: it also removes a *failed* run's artifacts — turn it off if you
+      # need to inspect them. Never touches a session-keyed (resumable) dir.
+      MEDIA_WORKSPACE_GC: reclaim
       # ARK_API_KEY: "<your-ark-key>"        # required when MEDIA_BACKEND=volc
       # ARK_IMAGE_MODEL: "doubao-seedream-4-0-250828"
       # ARK_VIDEO_MODEL: "doubao-seedance-1-0-pro-250528"

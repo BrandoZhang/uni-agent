@@ -203,6 +203,30 @@ rollout; a caller-supplied session id satisfies it for a resumable session.
 Cost accounting is already concurrency-safe regardless (the reward derives
 tokens from *this* run's trajectory, never the shared ledger).
 
+### Reclaiming the workspace at run end (`MEDIA_WORKSPACE_GC`)
+
+On a shared FS the per-run dirs would pile up under `<base>/` (a container
+backend reclaims its FS at `env.close()`, so this only bites `local_native` /
+`host`). Set **`MEDIA_WORKSPACE_GC=reclaim`** to have `UniAgentLoop` delete
+`<base>/<run_id>` at run end (default off, so demo/eval runs keep their
+artifacts to inspect; `config.yaml` turns it on for the 64-way training path).
+
+The one thing to get right is **sandbox vs. local FS**: the artifacts live on
+the *container's* FS for container backends and on the *host's* FS for
+`local_native` / `host`. So the deletion runs **through the env** (`rm -rf`
+inside the sandbox), never a host-side `shutil.rmtree` — that targets whichever
+FS is real and can't delete a host path for a container run. It fires *after*
+the reward (cost + film already extracted) and *before* `env.close()` (while
+the shell is alive), and is best-effort (never fails the run). Scope guards:
+it only ever deletes a dir this loop derived, and **never** a session-keyed
+(resumable) dir. Session-level and TTL/orphan reaping are deliberately left to
+the harness layer (a real run may crash before the finally block ever runs).
+
+> Caveat: `MEDIA_WORKSPACE_GC` also removes a *failed* run's artifacts. Keep it
+> off if you need to debug failures. And `keep=final`/exporting the film off a
+> container both require an explicit copy-out step (the film dies with the
+> container otherwise) — that's future harness work, not part of this reclaim.
+
 ## Two entrypoints
 
 - **`demo.py`** — standalone `AgentInteraction` run; endpoint via env vars.
