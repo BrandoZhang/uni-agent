@@ -1,9 +1,11 @@
 """Multimodal *creation* tools: text/image/video/audio -> image/video.
 
 These are thin uni-agent registrations for the standalone **media-ai** CLI
-toolkit (``packages/media-ai``). The actual implementation + HTTP calls live
-in that pip-installable package (``pip install -e packages/media-ai``); here we
-only declare the tool schemas so the model can call the commands.
+toolkit (https://github.com/BrandoZhang/media-ai). The actual implementation +
+HTTP calls live in that pip-installable package
+(``pip install "git+https://github.com/BrandoZhang/media-ai"``, or
+``pip install ".[media]"`` from this repo); here we only declare the tool
+schemas so the model can call the commands.
 
 Because the commands ship as ``media-ai`` console scripts (``text2image``,
 ``image2video``, ...), these are registered as **system tools**
@@ -126,8 +128,8 @@ class _MediaTool(AbstractTool):
     """Base for the media tools: each maps to a ``media-ai`` console script.
 
     ``copy_to_remote=False`` -> the runtime must already have ``media-ai`` on
-    PATH (``pip install -e packages/media-ai``); ``install_tools`` only does a
-    ``which <name>`` presence check.
+    PATH (``pip install "git+https://github.com/BrandoZhang/media-ai"``);
+    ``install_tools`` only does a ``which <name>`` presence check.
     """
 
     copy_to_remote = False

@@ -60,8 +60,8 @@
   tool_parser: qwen3_coder
 
   # The media tools are `media-ai` console scripts (system tools): the runtime
-  # must have `pip install media-ai` (or `-e packages/media-ai`) so they're on
-  # PATH. execute_bash / str_replace_editor / finish are copied in as usual.
+  # must have `pip install "git+https://github.com/BrandoZhang/media-ai"` so
+  # they're on PATH. execute_bash / str_replace_editor / finish are copied in.
   tools:
     - name: execute_bash
     - name: str_replace_editor

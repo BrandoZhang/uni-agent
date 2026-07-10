@@ -3,7 +3,8 @@
 
 Runs the storyboard pipeline directly (no model, no uni_agent loop) via the
 standalone media-ai package, so the toolchain can be verified anywhere it is
-installed (`pip install -e packages/media-ai`; needs Pillow + ffmpeg):
+installed (`pip install "git+https://github.com/BrandoZhang/media-ai"`; needs
+Pillow + ffmpeg):
 
   text2image -> image2image -> image2video -> text2video -> ref2video
              -> concat_video -> media_usage

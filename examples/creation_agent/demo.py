@@ -110,7 +110,7 @@ deployment_config = {"type": "local_native", "startup_timeout": 60.0}
 env_variables = {
     "NO_COLOR": "1",
     "TERM": "dumb",
-    # media tools are the `media-ai` console scripts (pip install -e packages/media-ai);
+    # media tools are the `media-ai` console scripts (pip install "git+https://github.com/BrandoZhang/media-ai");
     # these env vars steer their backend + cost ledger.
     "MEDIA_BACKEND": media_backend,
     "MEDIA_USAGE_LOG": str(usage_log),

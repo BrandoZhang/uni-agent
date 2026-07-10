@@ -37,8 +37,9 @@ a scripted mock LLM), and switches to real models by flipping two env vars.
 
 ## Tool suite → Volcengine (Ark) capabilities
 
-Each tool is a command from the standalone **[`media-ai`](../../packages/media-ai/)**
-package (`pip install -e packages/media-ai`) — a self-contained CLI toolkit
+Each tool is a command from the standalone **[`media-ai`](https://github.com/BrandoZhang/media-ai)**
+package (`pip install "git+https://github.com/BrandoZhang/media-ai"`, or
+`pip install ".[media]"` from this repo) — a self-contained CLI toolkit
 with **no uni-agent dependency**, so the same tools drop into any agent
 framework's sandbox. uni-agent registers them as *system tools* (thin
 schema wrappers in [`uni_agent/tools/media_gen/`](../../uni_agent/tools/media_gen/));
@@ -67,8 +68,8 @@ a queued task (a cost lever).
 
 ### 1. No-LLM smoke test (verify the toolchain now)
 
-Needs only the media-ai package (`pip install -e packages/media-ai`, which
-pulls in Pillow + ffmpeg). No model, no credentials, no uni-agent loop:
+Needs only the media-ai package (`pip install "git+https://github.com/BrandoZhang/media-ai"`,
+which pulls in Pillow + ffmpeg). No model, no credentials, no uni-agent loop:
 
 ```bash
 python examples/creation_agent/smoke_test.py
@@ -85,7 +86,7 @@ runtime, the real tools, and the mock media backend:
 
 ```bash
 pip install swe-rex openai loguru pydantic pydantic_settings orjson regex
-pip install -e packages/media-ai          # the media tools (Pillow + ffmpeg pulled in)
+pip install "git+https://github.com/BrandoZhang/media-ai"   # the media tools (Pillow + ffmpeg pulled in)
 python examples/creation_agent/demo.py
 ```
 
@@ -247,7 +248,7 @@ examples/creation_agent/
 ├── smoke_test.py        ← no-LLM toolchain test
 └── config.yaml          ← UniAgentLoop (large-scale / training) config
 
-packages/media-ai/          ← standalone media CLI toolkit (mock + Ark backends)
+github.com/BrandoZhang/media-ai  ← standalone media CLI toolkit (mock + Ark backends), a separate repo
 uni_agent/tools/media_gen/   ← thin uni-agent registrations for those commands
 uni_agent/reward/media_creation.py  ← cost-aware reward spec
 skills/<tool>/SKILL.md       ← one skill per generation tool (usage guidance)

@@ -20,6 +20,13 @@ license = {text = "Apache-2.0"}
 readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.10"
 
+# The multimodal generation tools ship as the standalone `media-ai` package
+# (https://github.com/BrandoZhang/media-ai). uni-agent invokes them as console
+# scripts on PATH (system tools, copy_to_remote=False), so they are an optional
+# runtime dependency rather than an import. Install with:  pip install ".[media]"
+[project.optional-dependencies]
+media = ["media-ai @ git+https://github.com/BrandoZhang/media-ai"]
+
 # -------------------------------
 # tool.ruff - Linting configuration
 # -------------------------------
