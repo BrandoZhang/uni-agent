@@ -1,4 +1,7 @@
+import base64
+import json
 import time
+from pathlib import Path
 from typing import Literal
 
 import orjson
@@ -45,6 +48,31 @@ def fast_deepcopy(obj):
     return orjson.loads(orjson.dumps(obj))
 
 
+def _content_preview(content) -> str:
+    """Render a message ``content`` for logging without dumping base64 image blobs.
+
+    ``content`` is either a plain string (the usual case) or an OpenAI-style list of
+    content parts (used for multimodal observations); image parts are collapsed to a
+    short ``[image]`` marker.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict):
+                if part.get("type") == "text":
+                    parts.append(part.get("text", ""))
+                elif part.get("type") in ("image_url", "image"):
+                    parts.append("[image]")
+                else:
+                    parts.append(f"[{part.get('type', 'part')}]")
+            else:
+                parts.append(str(part))
+        return "\n".join(parts)
+    return str(content)
+
+
 class AgentInteraction:
     def __init__(
         self,
@@ -58,12 +86,29 @@ class AgentInteraction:
         max_turns: int = 50,
         skills_manager: SkillsManager | None = None,
         chat_mode: bool = False,
+        multimodal_observations: bool = False,
     ):
         """:param chat_mode: how to treat an assistant message with no
         tool calls. ``False`` (default, training / code-eval) raises
         ``format_error`` so the loop continues. ``True`` (long-running
         chat) marks the step ``turn_done`` so the caller can wait for
         the next user message.
+
+        :param multimodal_observations: when ``True``, images produced by a
+        tool (detected via an ``image_path`` key in the tool's JSON
+        observation) are read back and appended to ``self.messages`` as an
+        OpenAI ``image_url`` content block, so a served VLM literally *sees*
+        the generated image on the next turn (the DeepEyes "image feedback"
+        mechanism, realized on Uni-Agent's own stack). This is the linchpin of
+        the multi-modality image agent. Default ``False`` keeps the text-only
+        behavior unchanged for every existing agent/test.
+
+        The image is attached to ``self.messages`` only -- it is **not** added to
+        the token-level ``rollout_cache`` -- so this is meant for the
+        inference path (``OpenAICompatibleChatModel``, which re-sends
+        ``self.messages`` each turn). The token-in/token-out training path
+        (``AgentChatModel``) stays text-only; true pixels-in-the-loss training
+        goes through the gateway/framework path instead.
         """
         self.env = env
         self.model = model
@@ -74,6 +119,7 @@ class AgentInteraction:
         self.timeout_budget = timeout_budget
         self.max_turns = max_turns
         self.chat_mode = chat_mode
+        self.multimodal_observations = multimodal_observations
         self.logger = get_logger("interaction", run_id)
 
     def inject_skills_manifest(self) -> None:
@@ -126,7 +172,7 @@ class AgentInteraction:
         self.logger.info(f"{'=' * 25} STEP {step_idx} {'=' * 25}")
 
         # step 1: prepare template
-        self.logger.info(f"🤖 MODEL INPUT\n{self.messages[-1]['content']}")
+        self.logger.info(f"🤖 MODEL INPUT\n{_content_preview(self.messages[-1]['content'])}")
 
         # step 2: generate response and update rollout cache
         try:
@@ -298,6 +344,10 @@ class AgentInteraction:
         self.rollout_cache = await self.model.append_messages_to_rollout_cache(tool_messages, self.rollout_cache)
         step_output.tool_results = tool_results
 
+        # step 6b: multimodal feedback -- show any tool-generated images to the VLM.
+        if self.multimodal_observations:
+            self._maybe_attach_generated_images(tool_results)
+
         # step 7: step-level exit_reason (precedence: terminal_dead >
         # timeout_budget_exhausted > finished > completed_with_tool_errors > completed)
         if terminal_dead:
@@ -320,6 +370,59 @@ class AgentInteraction:
         step_output.done = False
         step_output.exit_reason = "completed"
         return step_output
+
+    @staticmethod
+    def _extract_image_paths(observation: str) -> list[str]:
+        """Pull generated-image paths out of a tool observation.
+
+        The ``generate_image`` tool prints a single JSON object carrying an
+        ``image_path`` key; ``AgentEnv.run_action`` wraps it as
+        ``"Observation:\\n<json>"``. We locate the outermost ``{...}`` and read
+        ``image_path`` from it. Best-effort: any parse failure yields no paths.
+        """
+        start, end = observation.find("{"), observation.rfind("}")
+        if start == -1 or end <= start:
+            return []
+        try:
+            obj = json.loads(observation[start : end + 1])
+        except (json.JSONDecodeError, TypeError):
+            return []
+        path = obj.get("image_path") if isinstance(obj, dict) else None
+        return [path] if isinstance(path, str) and path else []
+
+    def _maybe_attach_generated_images(self, tool_results: list[ToolResult]) -> None:
+        """Append tool-generated images to ``self.messages`` as an image_url block.
+
+        Reads each produced image from disk (works for host/local deployments,
+        where the runtime shares the filesystem) and encodes it as a base64
+        ``data:`` URI so a served VLM sees it on the next turn. Attaches to
+        ``self.messages`` only (never the token-level ``rollout_cache``); see the
+        ``multimodal_observations`` note in ``__init__``.
+        """
+        image_parts: list[dict] = []
+        for tr in tool_results:
+            if tr.status != "ok":
+                continue
+            for path in self._extract_image_paths(tr.observation):
+                try:
+                    data = Path(path).read_bytes()
+                except OSError as e:
+                    self.logger.warning(f"multimodal feedback: cannot read image {path}: {e}")
+                    continue
+                b64 = base64.b64encode(data).decode("ascii")
+                image_parts.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}})
+
+        if not image_parts:
+            return
+
+        plural = len(image_parts) > 1
+        text = (
+            f"Here {'are' if plural else 'is'} the generated image{'s' if plural else ''} you produced. "
+            "Inspect closely and decide whether to refine the prompt and call generate_image again, "
+            "or call finish."
+        )
+        self.messages.append({"role": "user", "content": [{"type": "text", "text": text}, *image_parts]})
+        self.logger.info(f"🖼️  Attached {len(image_parts)} generated image(s) as multimodal observation")
 
     @auto_await
     async def run(self):

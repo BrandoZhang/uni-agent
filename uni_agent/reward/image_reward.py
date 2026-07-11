@@ -1,0 +1,194 @@
+"""Image-agent reward spec: a composite reward for a VLM that orchestrates image generation.
+
+Structure mirrors DeepEyes' ``compute_score``
+(``verl/recipe/deepeyes/deepeyes.py``: ``0.8*acc + 0.2*format + 1.2*tool``), adapted
+for a *generation* agent and computable fully offline:
+
+- **artifact** (the "acc" analog, weight 0.8): did the agent actually produce a valid
+  image? File exists, is non-empty, and -- when Pillow is available -- its pixel
+  dimensions match the size the agent requested.
+- **format** (weight 0.2, applied as a penalty in ``{0, -1}``): did the rollout stay
+  well-formed (no tool-call parse errors, and it reached ``finish``)?
+- **tool** (weight 1.2): did the agent use ``generate_image`` *and* end up with a valid
+  artifact -- i.e. it solved the task the intended way (DeepEyes gates ``tool`` on
+  correctness the same way).
+- **align** (weight 0.5, optional): keyword overlap between the final prompt and a
+  ground-truth ``keywords`` list, if provided. This slot is where a real reward model
+  goes -- swap ``_alignment_score`` for **HPSv3 / ImageReward / CLIPScore** (the
+  DanceGRPO reward-model route) or a VLM-as-judge, without touching the interface.
+
+GRPO's group-relative baseline turns this absolute score into the "did this rollout do
+better or worse than its siblings" signal, which is exactly the "变好还是变差" semantics
+the design targets.
+"""
+
+import json
+from pathlib import Path
+
+from uni_agent.async_logging import get_logger
+from uni_agent.reward.base import AbstractRewardSpec
+from uni_agent.reward.registry import register_reward_spec
+from uni_agent.utils import auto_await
+
+DEFAULT_WEIGHTS = {"artifact": 0.8, "format": 0.2, "tool": 1.2, "align": 0.5}
+
+
+def _get(obj, key, default=None):
+    """Read ``key`` from a StepOutput/ToolResult object *or* its dict form."""
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _parse_observation(observation: str) -> dict | None:
+    """Parse the outermost JSON object from a ``generate_image`` observation."""
+    if not observation:
+        return None
+    start, end = observation.find("{"), observation.rfind("}")
+    if start == -1 or end <= start:
+        return None
+    try:
+        obj = json.loads(observation[start : end + 1])
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _last_generated_image(trajectory: list) -> dict | None:
+    """Return the parsed observation of the last successful ``generate_image`` call."""
+    for step in reversed(trajectory):
+        for tr in reversed(_get(step, "tool_results", []) or []):
+            if _get(tr, "name") == "generate_image" and _get(tr, "status") == "ok":
+                obj = _parse_observation(_get(tr, "observation", "") or "")
+                if obj and obj.get("status") == "ok":
+                    return obj
+    return None
+
+
+def _artifact_score(image_info: dict | None) -> tuple[float, dict]:
+    """Score the produced artifact: exists + non-empty (+ dims match request)."""
+    detail: dict = {"exists": False, "requested_size": None, "actual_size": None, "size_match": None}
+    if not image_info:
+        return 0.0, detail
+
+    path = image_info.get("image_path")
+    detail["requested_size"] = image_info.get("size")
+    if not path or not Path(path).is_file() or Path(path).stat().st_size == 0:
+        return 0.0, detail
+    detail["exists"] = True
+
+    # Dimension check is a bonus when Pillow is available; otherwise "exists" is enough.
+    try:
+        from PIL import Image
+
+        with Image.open(path) as im:
+            actual = f"{im.size[0]}x{im.size[1]}"
+        detail["actual_size"] = actual
+        requested = (image_info.get("size") or "").lower().replace(" ", "")
+        if requested and "x" in requested:
+            match = actual == requested
+            detail["size_match"] = match
+            return (1.0 if match else 0.5), detail
+    except Exception:
+        # Pillow missing or unreadable -> existence alone earns full artifact credit.
+        pass
+    return 1.0, detail
+
+
+def _alignment_score(prompt: str, keywords: list[str]) -> float:
+    """Offline prompt/target alignment: fraction of ground-truth keywords in the prompt.
+
+    Placeholder for a real reward model (HPSv3 / ImageReward / CLIPScore / VLM-judge);
+    returns 0.0 when no keywords are supplied so the ``align`` slot is inert by default.
+    """
+    if not keywords:
+        return 0.0
+    p = (prompt or "").lower()
+    hits = sum(1 for kw in keywords if str(kw).lower() in p)
+    return hits / len(keywords)
+
+
+def score_trajectory(
+    trajectory: list,
+    ground_truth: dict | None = None,
+    weights: dict | None = None,
+) -> tuple[float, dict]:
+    """Pure, offline composite scorer (unit-testable without a live env)."""
+    weights = {**DEFAULT_WEIGHTS, **(weights or {})}
+    ground_truth = ground_truth or {}
+
+    # --- tool usage & final prompt ---
+    generate_calls = [
+        tr
+        for step in trajectory
+        for tr in (_get(step, "tool_results", []) or [])
+        if _get(tr, "name") == "generate_image"
+    ]
+    tool_used = any(_get(tr, "status") == "ok" for tr in generate_calls)
+
+    image_info = _last_generated_image(trajectory)
+    final_prompt = (image_info or {}).get("prompt", "")
+
+    # --- components ---
+    artifact, artifact_detail = _artifact_score(image_info)
+
+    # tool credit only when the intended tool was used AND yielded a valid artifact.
+    tool = 1.0 if (tool_used and artifact >= 1.0) else 0.0
+
+    # format penalty: parse errors or never reaching a clean finish.
+    exit_reasons = [_get(step, "exit_reason") for step in trajectory]
+    is_format_error = ("format_error" in exit_reasons) or (not generate_calls)
+    reached_finish = "finished" in exit_reasons
+    if not reached_finish:
+        is_format_error = True
+    format_penalty = -1.0 if is_format_error else 0.0
+
+    align = _alignment_score(final_prompt, ground_truth.get("keywords", []))
+
+    final = (
+        weights["artifact"] * artifact
+        + weights["format"] * format_penalty
+        + weights["tool"] * tool
+        + weights["align"] * align
+    )
+
+    info = {
+        "score": final,
+        "components": {"artifact": artifact, "format": format_penalty, "tool": tool, "align": align},
+        "weights": weights,
+        "tool_used": tool_used,
+        "num_generate_calls": len(generate_calls),
+        "final_prompt": final_prompt,
+        "artifact_detail": artifact_detail,
+        "reached_finish": reached_finish,
+    }
+    return final, info
+
+
+@register_reward_spec("image_agent")
+class ImageAgentRewardSpec(AbstractRewardSpec):
+    """Composite reward for the image-generation agent (see module docstring)."""
+
+    def __init__(
+        self,
+        *,
+        run_id: str | None = None,
+        ground_truth: dict | None = None,
+        weights: dict | None = None,
+        env=None,
+        **kwargs,
+    ):
+        self.run_id = run_id
+        self.ground_truth = ground_truth or {}
+        self.weights = weights
+        self.logger = get_logger("image-reward", run_id=run_id or "image-reward")
+
+    @auto_await
+    async def compute_reward(self, interaction_result: dict, **kwargs) -> tuple[float, dict]:
+        trajectory = interaction_result.get("trajectory", []) or []
+        score, info = score_trajectory(trajectory, self.ground_truth, self.weights)
+        self.logger.info(
+            f"image_agent reward={score:.3f} components={info['components']} "
+            f"tool_used={info['tool_used']} finish={info['reached_finish']}"
+        )
+        return score, info

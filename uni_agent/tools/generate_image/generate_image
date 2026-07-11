@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""Generate an image from a text prompt using the media-ai CLI.
+
+This is a *frozen* scaffold tool: the agent (a VLM) decides when to call it and
+writes the prompt; the tool shells out to ``media-ai image generate`` and prints a
+one-line JSON observation describing the produced artifact. With the default
+``mock`` provider the generation is fully offline -- no API keys, no network, no
+GPU -- and deterministic given ``(prompt, seed)``, so the whole demo runs on a bare
+box. Point ``--provider``/``$MEDIA_PROVIDER`` at a real backend (volc/openai/gemini)
+to generate real images without any code change.
+
+The output image is written under ``$IMAGE_AGENT_OUTPUT_DIR`` (default
+``/tmp/image_agent``) so the agent loop can locate it and, when multimodal feedback
+is enabled, show it back to the VLM. media-ai's usage-ledger writes are redirected
+into the same directory via ``$MEDIA_USAGE_LOG`` to avoid polluting the CWD.
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import uuid
+from pathlib import Path
+
+
+def _run_media_ai(cli_args: list[str]) -> subprocess.CompletedProcess | None:
+    """Invoke media-ai, preferring the console script and falling back to ``python -m``."""
+    for base in (["media-ai"], [sys.executable, "-m", "media_ai"]):
+        try:
+            return subprocess.run(base + cli_args, capture_output=True, text=True)
+        except FileNotFoundError:
+            continue
+    return None
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Generate an image from a text prompt via media-ai.")
+    parser.add_argument("--prompt", required=True, help="Text description of the image to generate.")
+    parser.add_argument("--size", default="1024x1024", help="Image size as WxH in pixels (e.g. 1024x1024).")
+    parser.add_argument("--negative_prompt", default=None, help="Optional: things to avoid in the image.")
+    parser.add_argument("--seed", default=None, help="Optional: integer seed for reproducible generation.")
+    parser.add_argument(
+        "--provider",
+        default=os.environ.get("MEDIA_PROVIDER", "mock"),
+        help="media-ai provider (default: mock, fully offline).",
+    )
+    args = parser.parse_args()
+
+    out_dir = Path(os.environ.get("IMAGE_AGENT_OUTPUT_DIR", "/tmp/image_agent"))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{uuid.uuid4().hex}.png"
+    # Keep media-ai's usage ledger inside the run dir instead of the CWD.
+    os.environ.setdefault("MEDIA_USAGE_LOG", str(out_dir / "media_usage.jsonl"))
+
+    cli_args = [
+        "image", "generate",
+        "--provider", args.provider,
+        "--prompt", args.prompt,
+        "--size", args.size,
+        "--output", str(out_path),
+    ]
+    if args.negative_prompt:
+        cli_args += ["--negative-prompt", args.negative_prompt]
+    if args.seed not in (None, "", "None"):
+        cli_args += ["--seed", str(args.seed)]
+
+    proc = _run_media_ai(cli_args)
+    if proc is None:
+        print(json.dumps({
+            "status": "error",
+            "error": "media-ai CLI not found. Install it with `pip install -e /path/to/media-ai`.",
+        }))
+        sys.exit(1)
+
+    if proc.returncode != 0:
+        # media-ai emits a JSON error object on stdout; surface it verbatim.
+        err = proc.stdout.strip() or proc.stderr.strip()
+        print(json.dumps({"status": "error", "returncode": proc.returncode, "error": err}))
+        sys.exit(proc.returncode if proc.returncode in (2, 3) else 1)
+
+    # media-ai prints exactly one JSON object on stdout; take the last non-empty line.
+    lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+    try:
+        result = json.loads(lines[-1]) if lines else {}
+    except json.JSONDecodeError:
+        result = {}
+    artifact = (result.get("artifacts") or [{}])[0]
+    meta = result.get("meta", {})
+    size = meta.get("size")
+    size_str = f"{size[0]}x{size[1]}" if isinstance(size, list) and len(size) == 2 else args.size
+
+    observation = {
+        "status": "ok",
+        "image_path": artifact.get("path", str(out_path)),
+        "prompt": args.prompt,
+        "size": size_str,
+        "seed": meta.get("seed"),
+        "bytes": artifact.get("bytes"),
+        "provider": result.get("provider", args.provider),
+        "note": (
+            "Image generated successfully. If image feedback is enabled you can now see it: "
+            "inspect it, then either refine the prompt and call generate_image again, or call "
+            "finish with your answer."
+        ),
+    }
+    print(json.dumps(observation, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()

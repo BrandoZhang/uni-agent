@@ -1,0 +1,24 @@
+working_dir: ./
+excludes: ["/.git/"]
+py_modules:
+  - ./uni_agent
+  - ./verl/verl
+pip:
+  packages:
+    - swe-rex
+    - loguru
+    - pydantic
+    - pydantic-settings
+    - orjson
+    - requests
+    - pillow            # media-ai renders nicer mock images with Pillow (works without it too)
+  # media-ai (the frozen image generator) is not on PyPI: install it into the cluster
+  # base image, e.g. `pip install -e /path/to/media-ai`, so the generate_image tool can
+  # invoke the `media-ai` CLI on every rollout worker.
+  pip_check: false
+env_vars:
+  VLLM_USE_V1: "1"
+  TORCH_DISTRIBUTED_BACKEND: "nccl"
+  NCCL_IB_DISABLE: "0"
+  RAY_worker_register_timeout_seconds: "120"
+  PYTHONUNBUFFERED: "1"

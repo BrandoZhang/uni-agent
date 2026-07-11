@@ -1,0 +1,41 @@
+# Agent-loop config for the multi-modality image-generation agent (classic UniAgentLoop path).
+# Wired into training via actor_rollout_ref.rollout.agent.agent_loop_config_path=<this file>.
+# `name` MUST equal the dataset's `agent_name` column ("image_agent").
+- name: image_agent
+
+  _target_: uni_agent.agent_loop.UniAgentLoop
+
+  concurrency: 512
+  log_dir: /tmp/image_agent
+  mask_abnormal_exit_traj: false
+
+  interaction:
+    action_timeout: 300
+    max_turns: 8
+    # NOTE: `multimodal_observations` is intentionally NOT set here. On the
+    # token-in/token-out training path the generated image is not injected into the
+    # loss tensors (see the demo/README); the orchestrator VLM is trained on the
+    # text/tool-use tokens. The inference demo enables image feedback explicitly.
+
+  env:
+    deployment:
+      type: host
+    env_variables:
+      # The generate_image tool writes PNGs here and redirects media-ai's usage ledger.
+      IMAGE_AGENT_OUTPUT_DIR: "/tmp/image_agent/artifacts"
+      MEDIA_USAGE_LOG: "/tmp/image_agent/media_usage.jsonl"
+      # Frozen image generator. `mock` is fully offline; swap for volc/openai/gemini
+      # (and provide that provider's credentials) to train against real generations.
+      MEDIA_PROVIDER: "mock"
+
+  tool_parser: hermes
+
+  tools:
+    - name: generate_image
+    - name: finish
+
+  # Composite reward (see uni_agent/reward/image_reward.py). Per-sample ground truth
+  # (e.g. {"keywords": [...]}) is merged in from the dataset's
+  # extra_info.tools_kwargs.reward.ground_truth.
+  reward:
+    name: image_agent
