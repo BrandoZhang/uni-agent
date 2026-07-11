@@ -5,10 +5,16 @@
 # examples/agent_train/single_node_debug.sh; see that script and
 # examples/search_agent/train_fully_async_128K.sh for the full megatron/cluster knobs.
 #
-# Requires a GPU node and a served-able VLM (e.g. Qwen2.5-VL). It trains the ORCHESTRATOR
-# VLM (which writes prompts and decides when to call generate_image); the image generator
-# (media-ai) stays frozen. GRPO's group-relative baseline is the "did this rollout do
-# better or worse than its siblings" signal.
+# Requires a GPU node and a served-able VLM (e.g. Qwen2.5-VL). It trains the ORCHESTRATOR's
+# TEXT/TOOL policy (which prompt to write, when to call generate_image, when to finish); the
+# image generator (media-ai) stays frozen. GRPO's group-relative baseline is the "did this
+# rollout do better or worse than its siblings" signal.
+#
+# IMPORTANT: on this classic UniAgentLoop path the generated PIXELS do NOT enter the loss
+# (convert_to_agent_output emits multi_modal_data={}; the rollout uses a text tokenizer, not an
+# image processor) -- the vision encoder gets no gradient. This is effectively LLM-style RL over
+# a VLM checkpoint. For true pixels-in-the-loss VLM RL, use the gateway/framework path described
+# in examples/image_agent/README.md (§5).
 #
 # Run from the repository root (so Ray packages both verl/ and uni_agent/):
 #   bash examples/image_agent/train.sh

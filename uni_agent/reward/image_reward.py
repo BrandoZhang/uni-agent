@@ -12,10 +12,15 @@ for a *generation* agent and computable fully offline:
 - **tool** (weight 1.2): did the agent use ``generate_image`` *and* end up with a valid
   artifact -- i.e. it solved the task the intended way (DeepEyes gates ``tool`` on
   correctness the same way).
-- **align** (weight 0.5, optional): keyword overlap between the final prompt and a
-  ground-truth ``keywords`` list, if provided. This slot is where a real reward model
-  goes -- swap ``_alignment_score`` for **HPSv3 / ImageReward / CLIPScore** (the
-  DanceGRPO reward-model route) or a VLM-as-judge, without touching the interface.
+- **quality** (weight 0.5): perceptual/alignment quality of the final image.
+  * With ``reward.quality_model`` set (``vlm_judge`` / ``image_reward`` / ``hpsv3`` -- see
+    ``uni_agent/reward/quality_models.py``) this is a **real reward model** (the DanceGRPO
+    reward-model route / DeepEyes VLM-judge). Needs real generated images + the model's deps;
+    it is **meaningless on media-ai's ``mock`` provider** (placeholder cards) and is therefore
+    OFF by default.
+  * Otherwise it falls back to an offline keyword-overlap proxy against a ground-truth
+    ``keywords`` list -- enough to make the offline demo/tests deterministic, not a real
+    quality signal.
 
 GRPO's group-relative baseline turns this absolute score into the "did this rollout do
 better or worse than its siblings" signal, which is exactly the "变好还是变差" semantics
@@ -23,14 +28,18 @@ the design targets.
 """
 
 import json
+import logging
 from pathlib import Path
 
 from uni_agent.async_logging import get_logger
 from uni_agent.reward.base import AbstractRewardSpec
+from uni_agent.reward.quality_models import get_quality_scorer
 from uni_agent.reward.registry import register_reward_spec
 from uni_agent.utils import auto_await
 
-DEFAULT_WEIGHTS = {"artifact": 0.8, "format": 0.2, "tool": 1.2, "align": 0.5}
+logger = logging.getLogger(__name__)
+
+DEFAULT_WEIGHTS = {"artifact": 0.8, "format": 0.2, "tool": 1.2, "quality": 0.5}
 
 
 def _get(obj, key, default=None):
@@ -95,25 +104,53 @@ def _artifact_score(image_info: dict | None) -> tuple[float, dict]:
     return 1.0, detail
 
 
-def _alignment_score(prompt: str, keywords: list[str]) -> float:
-    """Offline prompt/target alignment: fraction of ground-truth keywords in the prompt.
+def _keyword_quality(prompt: str, keywords: list[str]) -> float:
+    """Offline quality proxy: fraction of ground-truth ``keywords`` present in the prompt.
 
-    Placeholder for a real reward model (HPSv3 / ImageReward / CLIPScore / VLM-judge);
-    returns 0.0 when no keywords are supplied so the ``align`` slot is inert by default.
+    A deterministic stand-in used when no real ``quality_model`` is configured (e.g. the
+    offline mock demo). Returns 0.0 when no keywords are supplied.
     """
-    if not keywords:
+    if keywords is None or len(keywords) == 0:
         return 0.0
     p = (prompt or "").lower()
     hits = sum(1 for kw in keywords if str(kw).lower() in p)
     return hits / len(keywords)
 
 
+def _compute_quality(image_info, final_prompt, keywords, quality_scorer) -> tuple[float, str]:
+    """Quality component: a real reward model if provided, else the offline keyword proxy.
+
+    Returns ``(score_in_0_1, mode)``. A scorer that raises (missing weights, dead judge
+    endpoint, ...) degrades gracefully to the keyword proxy so a rollout is never lost to a
+    reward-side error.
+    """
+    path = (image_info or {}).get("image_path")
+    if quality_scorer is not None and path and Path(path).is_file():
+        if (image_info or {}).get("provider") == "mock":
+            logger.warning(
+                "quality_model is set but the image came from the 'mock' provider "
+                "(placeholder card); the quality score is not meaningful."
+            )
+        try:
+            q = quality_scorer.score(path, final_prompt)
+            return max(0.0, min(1.0, float(q))), f"reward_model:{type(quality_scorer).__name__}"
+        except Exception as e:
+            logger.warning("quality_model scoring failed (%s); falling back to keyword proxy", e)
+    return _keyword_quality(final_prompt, keywords), "offline_keywords"
+
+
 def score_trajectory(
     trajectory: list,
     ground_truth: dict | None = None,
     weights: dict | None = None,
+    quality_scorer=None,
 ) -> tuple[float, dict]:
-    """Pure, offline composite scorer (unit-testable without a live env)."""
+    """Composite scorer. Offline/pure unless a ``quality_scorer`` is supplied.
+
+    :param quality_scorer: optional object with ``score(image_path, prompt) -> [0,1]``
+        (see ``uni_agent/reward/quality_models.py``). When ``None``, the quality component
+        uses the offline keyword proxy, so the function stays pure/unit-testable.
+    """
     weights = {**DEFAULT_WEIGHTS, **(weights or {})}
     ground_truth = ground_truth or {}
 
@@ -143,18 +180,19 @@ def score_trajectory(
         is_format_error = True
     format_penalty = -1.0 if is_format_error else 0.0
 
-    align = _alignment_score(final_prompt, ground_truth.get("keywords", []))
+    quality, quality_mode = _compute_quality(image_info, final_prompt, ground_truth.get("keywords", []), quality_scorer)
 
     final = (
         weights["artifact"] * artifact
         + weights["format"] * format_penalty
         + weights["tool"] * tool
-        + weights["align"] * align
+        + weights["quality"] * quality
     )
 
     info = {
         "score": final,
-        "components": {"artifact": artifact, "format": format_penalty, "tool": tool, "align": align},
+        "components": {"artifact": artifact, "format": format_penalty, "tool": tool, "quality": quality},
+        "quality_mode": quality_mode,
         "weights": weights,
         "tool_used": tool_used,
         "num_generate_calls": len(generate_calls),
@@ -175,20 +213,32 @@ class ImageAgentRewardSpec(AbstractRewardSpec):
         run_id: str | None = None,
         ground_truth: dict | None = None,
         weights: dict | None = None,
+        quality_model: str | dict | None = None,
         env=None,
         **kwargs,
     ):
+        """:param quality_model: optional real quality reward -- a name or
+        ``{"name": "vlm_judge"|"image_reward"|"hpsv3", ...}`` (see
+        ``quality_models.get_quality_scorer``). ``None`` (default) uses the offline keyword
+        proxy so the mock demo stays deterministic. Only turn it on with real images.
+        """
         self.run_id = run_id
         self.ground_truth = ground_truth or {}
         self.weights = weights
         self.logger = get_logger("image-reward", run_id=run_id or "image-reward")
+        try:
+            self.quality_scorer = get_quality_scorer(quality_model)
+        except Exception as e:
+            # A misconfigured/optional quality model must not break training rollouts.
+            self.logger.warning(f"quality_model {quality_model!r} unavailable ({e}); using keyword proxy")
+            self.quality_scorer = None
 
     @auto_await
     async def compute_reward(self, interaction_result: dict, **kwargs) -> tuple[float, dict]:
         trajectory = interaction_result.get("trajectory", []) or []
-        score, info = score_trajectory(trajectory, self.ground_truth, self.weights)
+        score, info = score_trajectory(trajectory, self.ground_truth, self.weights, quality_scorer=self.quality_scorer)
         self.logger.info(
             f"image_agent reward={score:.3f} components={info['components']} "
-            f"tool_used={info['tool_used']} finish={info['reached_finish']}"
+            f"quality_mode={info['quality_mode']} tool_used={info['tool_used']} finish={info['reached_finish']}"
         )
         return score, info

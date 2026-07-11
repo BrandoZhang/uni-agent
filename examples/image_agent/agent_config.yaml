@@ -39,3 +39,9 @@
   # extra_info.tools_kwargs.reward.ground_truth.
   reward:
     name: image_agent
+    # Optional REAL image-quality reward (off by default). Meaningless on the `mock`
+    # provider -- enable only with a real MEDIA_PROVIDER generating real images:
+    # quality_model:
+    #   name: vlm_judge            # or: image_reward | hpsv3
+    #   base_url: http://localhost:8000/v1
+    #   model: Qwen/Qwen2.5-VL-7B-Instruct

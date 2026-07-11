@@ -90,15 +90,46 @@ def test_no_tool_call_is_format_error():
     assert score == pytest.approx(DEFAULT_WEIGHTS["format"] * -1.0)
 
 
-def test_alignment_keywords(tmp_path):
+def test_offline_quality_keywords(tmp_path):
     img = tmp_path / "out.png"
     _make_png(img, (512, 512))
     prompt = "a red bicycle at sunset, cinematic lighting"
     trajectory = [_gen_step(img, "512x512", prompt), _finish_step()]
 
     _, info = score_trajectory(trajectory, ground_truth={"keywords": ["bicycle", "sunset", "spaceship"]})
-    # 2 of 3 keywords present
-    assert info["components"]["align"] == pytest.approx(2 / 3)
+    # 2 of 3 keywords present, via the offline proxy
+    assert info["components"]["quality"] == pytest.approx(2 / 3)
+    assert info["quality_mode"] == "offline_keywords"
+
+
+def test_real_quality_scorer_used(tmp_path):
+    img = tmp_path / "out.png"
+    _make_png(img, (512, 512))
+    trajectory = [_gen_step(img, "512x512"), _finish_step()]
+
+    class _FakeScorer:
+        def score(self, image_path, prompt):
+            assert image_path.endswith(".png") and prompt
+            return 0.9
+
+    _, info = score_trajectory(trajectory, quality_scorer=_FakeScorer())
+    assert info["components"]["quality"] == pytest.approx(0.9)
+    assert info["quality_mode"].startswith("reward_model:")
+
+
+def test_quality_scorer_failure_falls_back(tmp_path):
+    img = tmp_path / "out.png"
+    _make_png(img, (512, 512))
+    trajectory = [_gen_step(img, "512x512", "a red bicycle at sunset"), _finish_step()]
+
+    class _BoomScorer:
+        def score(self, image_path, prompt):
+            raise RuntimeError("no weights")
+
+    _, info = score_trajectory(trajectory, ground_truth={"keywords": ["bicycle"]}, quality_scorer=_BoomScorer())
+    # degrades gracefully to the offline proxy rather than losing the rollout
+    assert info["quality_mode"] == "offline_keywords"
+    assert info["components"]["quality"] == pytest.approx(1.0)
 
 
 def test_registry_and_async_interface(tmp_path):
