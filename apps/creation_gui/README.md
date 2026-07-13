@@ -7,6 +7,9 @@ plan a storyboard and call its generation tools, see the generated images/clips
 It runs **fully offline** by default (scripted mock LLM + mock media backend);
 flip two env vars for a real model + real generation.
 
+> Continuing this work? See [`docs/creation-agent-handoff.md`](../../docs/creation-agent-handoff.md)
+> for design decisions, the media-ai repo split, and open next-steps.
+
 ```bash
 python -m apps.creation_gui.server --port 8770
 # open http://127.0.0.1:8770

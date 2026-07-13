@@ -8,6 +8,11 @@ on the same `AgentInteraction` loop as the other uni-agent examples.
 It runs **fully offline with no GPU** by default (mock generation backend +
 a scripted mock LLM), and switches to real models by flipping two env vars.
 
+> **Continuing this work / new session?** Read
+> [`docs/creation-agent-handoff.md`](../../docs/creation-agent-handoff.md) first
+> — it captures the design decisions, the media-ai repo split, open next-steps,
+> and the process constraints.
+
 ---
 
 ## What this demonstrates (the four requirements)
