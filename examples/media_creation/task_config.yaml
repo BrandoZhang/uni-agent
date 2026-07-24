@@ -1,0 +1,39 @@
+# Task config for the media_creation task (the parallel_infer_api / RL runner).
+#
+# The agent drives the standalone `media-ai` CLI (on PATH) via the shell tool,
+# guided by media-ai's packaged skills -- uploaded into the sandbox and surfaced
+# as a progressive-disclosure manifest in the system prompt. Scored by a
+# cost-aware reward: quality_proxy - cost_weight * total_tokens.
+#
+# The endpoint (`--base-url` / `--model` / `--api-key`) is layered onto
+# `agent.model` by the runner; the per-sample brief rides in on the dataset row
+# (`prompt` / `metadata`). For a self-contained offline run with no model server,
+# use `examples/media_creation/demo.py` instead.
+#
+#   python examples/inference/parallel_infer_api.py \
+#     --data-path <briefs.parquet> \
+#     --task-config examples/media_creation/task_config.yaml \
+#     --base-url <endpoint> --model <model> --api-key <key> --concurrency 8
+- name: media_creation
+  sandbox:
+    provider: local            # local host FS; use docker/modal for per-rollout isolation
+  workspace: /tmp/media_creation
+  cost_weight: 0.0001          # reward = quality_proxy - cost_weight * total_tokens
+  quality_min_seconds: 4       # footage a film needs for full quality credit
+  agent:
+    name: react
+    max_steps: 20
+    tools:
+      # media-ai is a self-driving CLI, so the generic shell tool is all the
+      # agent needs; its skills document the commands.
+      - name: stateful_shell
+        command_timeout: 300
+        env_vars:
+          MEDIA_PROVIDER: mock                 # backend: mock|volc|openai|gemini|elevenlabs
+          MEDIA_USAGE_LOG: /tmp/media_creation/usage.jsonl
+          # ARK_API_KEY: "<your-ark-key>"      # required when MEDIA_PROVIDER=volc
+      - name: submit                           # lets the policy end the episode explicitly
+    model:
+      temperature: 0.7
+      top_p: 0.95
+      max_total_tokens: 200000
